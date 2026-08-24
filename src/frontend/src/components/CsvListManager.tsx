@@ -77,22 +77,29 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
     }
   };
 
+  const inputClass =
+    'mt-1 w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm text-slate-900 ' +
+    'outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ' +
+    'disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-slate-900 ' +
+    'dark:text-slate-100';
+
   return (
-    <section className="csv-list-manager" aria-labelledby="csv-list-manager-title">
-      <div className="csv-list-manager__header">
-        <div>
-          <h3 id="csv-list-manager-title">Imported CSV Lists</h3>
-          <p>
-            Upload one CSV per list. <strong>Title</strong> is required; Author, ISBN, ISBN13,
-            and Rank are optional. Uploading the same list name replaces that list.
-          </p>
-        </div>
+    <section className="space-y-4" aria-labelledby="csv-list-manager-title">
+      <div>
+        <h3 id="csv-list-manager-title" className="text-base font-semibold">
+          Imported CSV Lists
+        </h3>
+        <p className="mt-1 text-sm opacity-70">
+          Upload one CSV per list. <strong>Title</strong> is required; Author, ISBN, ISBN13,
+          and Rank are optional. Uploading the same list name replaces that list.
+        </p>
       </div>
 
-      <div className="csv-list-manager__upload">
-        <label>
+      <div className="grid gap-3 rounded-xl border border-black/10 p-4 dark:border-white/10 md:grid-cols-2">
+        <label className="text-sm font-medium">
           <span>List name (optional)</span>
           <input
+            className={inputClass}
             type="text"
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -100,29 +107,53 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
             disabled={busy}
           />
         </label>
-        <label>
+        <label className="text-sm font-medium">
           <span>CSV file</span>
-          <input ref={fileRef} type="file" accept=".csv,text/csv" disabled={busy} />
+          <input
+            className={inputClass}
+            ref={fileRef}
+            type="file"
+            accept=".csv,text/csv"
+            disabled={busy}
+          />
         </label>
-        <button type="button" onClick={() => void handleUpload()} disabled={busy}>
-          {busy ? 'Working…' : 'Import CSV'}
-        </button>
+        <div className="md:col-span-2">
+          <button
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            onClick={() => void handleUpload()}
+            disabled={busy}
+          >
+            {busy ? 'Working…' : 'Import CSV'}
+          </button>
+        </div>
       </div>
 
-      {error && <p className="csv-list-manager__error" role="alert">{error}</p>}
-      {message && <p className="csv-list-manager__message" role="status">{message}</p>}
+      {error && (
+        <p className="rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-700 dark:text-red-300" role="alert">
+          {error}
+        </p>
+      )}
+      {message && (
+        <p className="rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300" role="status">
+          {message}
+        </p>
+      )}
 
       {lists.length === 0 ? (
-        <p className="csv-list-manager__empty">No CSV lists have been imported yet.</p>
+        <p className="text-sm opacity-60">No CSV lists have been imported yet.</p>
       ) : (
-        <div className="csv-list-manager__lists">
+        <div className="divide-y divide-black/10 rounded-xl border border-black/10 dark:divide-white/10 dark:border-white/10">
           {lists.map((list) => (
-            <div className="csv-list-manager__row" key={list.id}>
-              <div>
-                <strong>{list.name}</strong>
-                <div>{list.book_count.toLocaleString()} books · {list.filename}</div>
+            <div className="flex items-center justify-between gap-4 p-3" key={list.id}>
+              <div className="min-w-0">
+                <strong className="block truncate text-sm">{list.name}</strong>
+                <div className="truncate text-xs opacity-60">
+                  {list.book_count.toLocaleString()} books · {list.filename}
+                </div>
               </div>
               <button
+                className="shrink-0 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-700 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300"
                 type="button"
                 onClick={() => void handleDelete(list)}
                 disabled={busy}
