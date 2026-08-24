@@ -1,5 +1,6 @@
 import type { ComponentType, ReactNode } from 'react';
 
+import { CsvListsManagementField } from './CsvListsManagementField';
 import { NamingTemplateField } from './NamingTemplateField';
 import { OidcAdminHint } from './OidcAdminHint';
 import { OidcEnvInfo } from './OidcEnvInfo';
@@ -44,6 +45,9 @@ const CUSTOM_FIELD_DEFINITIONS: Record<string, CustomFieldDefinition> = {
           : undefined,
       };
     },
+  },
+  csv_lists_management: {
+    renderer: CsvListsManagementField,
   },
   request_policy_grid: {
     renderer: RequestPolicyGridField,
