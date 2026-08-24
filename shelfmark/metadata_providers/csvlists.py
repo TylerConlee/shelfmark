@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from shelfmark.core.settings_registry import CheckboxField, HeadingField, SettingsField, register_settings
+from shelfmark.core.settings_registry import (
+    CheckboxField,
+    CustomComponentField,
+    HeadingField,
+    SettingsField,
+    register_settings,
+)
 from shelfmark.csv_lists import CsvListBook, csv_lists_dir, list_csv_lists, load_csv_list
 from shelfmark.metadata_providers import (
     BookMetadata,
@@ -200,5 +206,11 @@ def csvlists_settings() -> list[SettingsField]:
             label="Enable CSV Lists",
             description="Enable locally imported CSV files as a metadata/list provider",
             default=False,
+        ),
+        CustomComponentField(
+            key="csv_lists_management",
+            component="csv_lists_management",
+            label="Imported CSV Lists",
+            description="Upload, replace, or delete locally stored CSV book lists.",
         ),
     ]
