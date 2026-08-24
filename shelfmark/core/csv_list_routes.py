@@ -10,19 +10,20 @@ from typing import TYPE_CHECKING
 
 from flask import Flask, Response, jsonify, request
 
-from shelfmark.csv_lists import delete_csv_list, list_csv_lists, save_csv_list
+from shelfmark.csv_lists import CsvListInfo, delete_csv_list, list_csv_lists, save_csv_list
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
     from flask.typing import ResponseReturnValue
 
 
-def _serialize_list(item: object) -> dict[str, object]:
+def _serialize_list(item: CsvListInfo) -> dict[str, object]:
     return {
-        "id": getattr(item, "list_id"),
-        "name": getattr(item, "name"),
-        "filename": getattr(item, "filename"),
-        "book_count": getattr(item, "book_count"),
+        "id": item.list_id,
+        "name": item.name,
+        "filename": item.filename,
+        "book_count": item.book_count,
     }
 
 
