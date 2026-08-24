@@ -33,6 +33,7 @@ from shelfmark.core.auth_modes import (
     normalize_auth_source,
 )
 from shelfmark.core.config import config as app_config
+from shelfmark.core.csv_list_routes import register_csv_list_routes
 from shelfmark.core.cwa_user_sync import sync_cwa_users_from_rows
 from shelfmark.core.logger import setup_logger
 
@@ -171,6 +172,8 @@ def register_admin_routes(app: Flask, user_db: UserDB) -> None:
             return f(*args, **kwargs)
 
         return decorated
+
+    register_csv_list_routes(app, _require_admin)
 
     @app.route("/api/admin/users", methods=["GET"])
     @_require_admin
