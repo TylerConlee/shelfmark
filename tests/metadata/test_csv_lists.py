@@ -17,10 +17,10 @@ def csv_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_parse_compact_export_csv() -> None:
     payload = (
-        "Title,Author,Status\n"
-        "Project Hail Mary,Andy Weir,Want to Read\n"
-        "Piranesi,Susanna Clarke,Want to Read\n"
-    ).encode()
+        b"Title,Author,Status\n"
+        b"Project Hail Mary,Andy Weir,Want to Read\n"
+        b"Piranesi,Susanna Clarke,Want to Read\n"
+    )
 
     books = csv_lists.parse_csv_bytes(payload)
 
@@ -33,9 +33,9 @@ def test_parse_compact_export_csv() -> None:
 
 def test_parse_goodreads_style_columns_and_isbn() -> None:
     payload = (
-        "Book Title,Authors,ISBN,ISBN13,Rank\n"
-        "Dune,Frank Herbert,0441172717,9780441172719,42\n"
-    ).encode()
+        b"Book Title,Authors,ISBN,ISBN13,Rank\n"
+        b"Dune,Frank Herbert,0441172717,9780441172719,42\n"
+    )
 
     books = csv_lists.parse_csv_bytes(payload)
 
