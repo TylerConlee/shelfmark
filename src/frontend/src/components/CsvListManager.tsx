@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
+import { useMountEffect } from '../hooks/useMountEffect';
 import {
   deleteCsvList,
   listCsvLists,
@@ -20,6 +21,7 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -31,9 +33,9 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
     }
   }, []);
 
-  useEffect(() => {
+  useMountEffect(() => {
     void refresh();
-  }, [refresh]);
+  });
 
   const handleUpload = async () => {
     const file = fileRef.current?.files?.[0];
@@ -46,6 +48,7 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
       setBusy(true);
       setError('');
       setMessage('');
+      setPendingDeleteId(null);
       const imported = await uploadCsvList(file, name);
       setMessage(`Imported ${imported.name} (${imported.book_count.toLocaleString()} books).`);
       setName('');
@@ -60,7 +63,11 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
   };
 
   const handleDelete = async (list: CsvListInfo) => {
-    if (!window.confirm(`Delete CSV list “${list.name}”?`)) return;
+    if (pendingDeleteId !== list.id) {
+      setPendingDeleteId(list.id);
+      setMessage(`Click “Confirm delete” to remove ${list.name}.`);
+      return;
+    }
 
     try {
       setBusy(true);
@@ -68,6 +75,7 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
       setMessage('');
       await deleteCsvList(list.id);
       setMessage(`Deleted ${list.name}.`);
+      setPendingDeleteId(null);
       await refresh();
       onChanged?.();
     } catch (err) {
@@ -130,12 +138,18 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
       </div>
 
       {error && (
-        <p className="rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-700 dark:text-red-300" role="alert">
+        <p
+          className="rounded-lg bg-red-500/15 px-3 py-2 text-sm text-red-700 dark:text-red-300"
+          role="alert"
+        >
           {error}
         </p>
       )}
       {message && (
-        <p className="rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300" role="status">
+        <p
+          className="rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300"
+          role="status"
+        >
           {message}
         </p>
       )}
@@ -144,29 +158,45 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
         <p className="text-sm opacity-60">No CSV lists have been imported yet.</p>
       ) : (
         <div className="divide-y divide-black/10 rounded-xl border border-black/10 dark:divide-white/10 dark:border-white/10">
-          {lists.map((list) => (
-            <div className="flex items-center justify-between gap-4 p-3" key={list.id}>
-              <div className="min-w-0">
-                <strong className="block truncate text-sm">{list.name}</strong>
-                <div className="truncate text-xs opacity-60">
-                  {list.book_count.toLocaleString()} books · {list.filename}
+          {lists.map((list) => {
+            const isPendingDelete = pendingDeleteId === list.id;
+            return (
+              <div className="flex items-center justify-between gap-4 p-3" key={list.id}>
+                <div className="min-w-0">
+                  <strong className="block truncate text-sm">{list.name}</strong>
+                  <div className="truncate text-xs opacity-60">
+                    {list.book_count.toLocaleString()} books · {list.filename}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {isPendingDelete && (
+                    <button
+                      className="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-medium transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:hover:bg-white/5"
+                      type="button"
+                      onClick={() => {
+                        setPendingDeleteId(null);
+                        setMessage('');
+                      }}
+                      disabled={busy}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <button
+                    className="rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-700 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300"
+                    type="button"
+                    onClick={() => void handleDelete(list)}
+                    disabled={busy}
+                    aria-label={`${isPendingDelete ? 'Confirm delete' : 'Delete'} ${list.name}`}
+                  >
+                    {isPendingDelete ? 'Confirm delete' : 'Delete'}
+                  </button>
                 </div>
               </div>
-              <button
-                className="shrink-0 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-700 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300"
-                type="button"
-                onClick={() => void handleDelete(list)}
-                disabled={busy}
-                aria-label={`Delete ${list.name}`}
-              >
-                Delete
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>
   );
 };
-
-export default CsvListManager;
