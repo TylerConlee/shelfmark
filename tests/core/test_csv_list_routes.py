@@ -7,6 +7,7 @@ import pytest
 from flask import Flask
 
 from shelfmark import csv_lists
+from shelfmark.core import admin_routes
 from shelfmark.core.csv_list_routes import register_csv_list_routes
 
 
@@ -88,3 +89,25 @@ def test_upload_rejects_non_csv_and_invalid_csv(app: Flask) -> None:
 def test_delete_unknown_list_returns_404(app: Flask) -> None:
     response = app.test_client().delete("/api/csv-lists/no-such-list")
     assert response.status_code == 404
+
+
+def test_admin_routes_register_csv_management(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CSV management is reachable through Shelfmark's existing admin registrar."""
+    monkeypatch.setattr(csv_lists, "CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(admin_routes, "load_active_auth_mode", lambda *_args, **_kwargs: "none")
+
+    flask_app = Flask(__name__)
+    flask_app.config["TESTING"] = True
+    admin_routes.register_admin_routes(flask_app, object())
+
+    response = flask_app.test_client().post(
+        "/api/csv-lists",
+        data={"file": (io.BytesIO(b"Title,Author\nDune,Frank Herbert\n"), "batch.csv")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["book_count"] == 1
