@@ -111,3 +111,31 @@ def test_admin_routes_register_csv_management(
 
     assert response.status_code == 201
     assert response.get_json()["book_count"] == 1
+
+
+def test_csv_management_requires_admin_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CSV files are global configuration and must not be writable by regular users."""
+    monkeypatch.setattr(csv_lists, "CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(admin_routes, "load_active_auth_mode", lambda *_args, **_kwargs: "builtin")
+
+    flask_app = Flask(__name__)
+    flask_app.config.update(TESTING=True, SECRET_KEY="csv-list-test-secret")
+    admin_routes.register_admin_routes(flask_app, object())
+    client = flask_app.test_client()
+
+    assert client.get("/api/csv-lists").status_code == 401
+
+    with client.session_transaction() as session:
+        session["user_id"] = "reader"
+        session["is_admin"] = False
+    assert client.get("/api/csv-lists").status_code == 403
+
+    with client.session_transaction() as session:
+        session["user_id"] = "admin"
+        session["is_admin"] = True
+    response = client.get("/api/csv-lists")
+    assert response.status_code == 200
+    assert response.get_json() == []
