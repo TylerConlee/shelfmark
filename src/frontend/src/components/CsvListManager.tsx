@@ -1,9 +1,10 @@
 import { useCallback, useRef, useState } from 'react';
 
-import { useMountEffect } from '../hooks/useMountEffect';
+import { useDependencyEffect, useMountEffect } from '../hooks/useMountEffect';
 import {
   deleteCsvList,
   listCsvLists,
+  queueAllCsvList,
   type CsvListInfo,
   uploadCsvList,
 } from '../services/csvListsApi';
@@ -36,6 +37,12 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
   useMountEffect(() => {
     void refresh();
   });
+
+  useDependencyEffect(() => {
+    if (!lists.some((list) => list.processing)) return undefined;
+    const timer = window.setInterval(() => void refresh(), 2000);
+    return () => window.clearInterval(timer);
+  }, [lists, refresh]);
 
   const handleUpload = async () => {
     const file = fileRef.current?.files?.[0];
@@ -85,6 +92,23 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
     }
   };
 
+  const handleQueueAll = async (list: CsvListInfo) => {
+    try {
+      setBusy(true);
+      setError('');
+      setMessage('');
+      const started = await queueAllCsvList(list.id);
+      setMessage(
+        started ? `Started processing ${list.name}.` : `${list.name} is already processing.`,
+      );
+      await refresh();
+    } catch (err) {
+      setError(readableError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const inputClass =
     'mt-1 w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm text-slate-900 ' +
     'outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 ' +
@@ -98,12 +122,12 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
           Imported CSV Lists
         </h3>
         <p className="mt-1 text-sm opacity-70">
-          Upload one CSV per list. <strong>Title</strong> is required; Author, ISBN, ISBN13,
-          and Rank are optional. Uploading the same list name replaces that list.
+          Upload one CSV per list. <strong>Title</strong> is required; Author, ISBN, ISBN13, and
+          Rank are optional. Uploading the same list name replaces that list.
         </p>
       </div>
 
-      <div className="grid gap-3 rounded-xl border border-black/10 p-4 dark:border-white/10 md:grid-cols-2">
+      <div className="grid gap-3 rounded-xl border border-black/10 p-4 md:grid-cols-2 dark:border-white/10">
         <label className="text-sm font-medium">
           <span>List name (optional)</span>
           <input
@@ -167,8 +191,32 @@ export const CsvListManager = ({ onChanged }: CsvListManagerProps) => {
                   <div className="truncate text-xs opacity-60">
                     {list.book_count.toLocaleString()} books · {list.filename}
                   </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs opacity-75">
+                    <span>Not queued {list.counts.not_queued ?? 0}</span>
+                    <span>Searching {list.counts.searching ?? 0}</span>
+                    <span>Queued {list.counts.queued ?? 0}</span>
+                    <span>Downloading {list.counts.downloading ?? 0}</span>
+                    <span>Complete {list.counts.complete ?? 0}</span>
+                    <span>No match {list.counts.no_match ?? 0}</span>
+                    <span>Failed {list.counts.failed ?? 0}</span>
+                  </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    type="button"
+                    onClick={() => void handleQueueAll(list)}
+                    disabled={
+                      busy ||
+                      list.processing ||
+                      (list.counts.not_queued ?? 0) +
+                        (list.counts.no_match ?? 0) +
+                        (list.counts.failed ?? 0) ===
+                        0
+                    }
+                  >
+                    {list.processing ? 'Processing…' : 'Queue All'}
+                  </button>
                   {isPendingDelete && (
                     <button
                       className="rounded-lg border border-black/15 px-3 py-1.5 text-xs font-medium transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:hover:bg-white/5"

@@ -33,8 +33,7 @@ def test_parse_compact_export_csv() -> None:
 
 def test_parse_goodreads_style_columns_and_isbn() -> None:
     payload = (
-        b"Book Title,Authors,ISBN,ISBN13,Rank\n"
-        b"Dune,Frank Herbert,0441172717,9780441172719,42\n"
+        b"Book Title,Authors,ISBN,ISBN13,Rank\nDune,Frank Herbert,0441172717,9780441172719,42\n"
     )
 
     books = csv_lists.parse_csv_bytes(payload)
@@ -82,6 +81,18 @@ def test_list_csv_lists_reports_counts(csv_dir: Path) -> None:
         ("Batch-1", 1),
         ("Batch-2", 2),
     ]
+    assert lists[0].counts["not_queued"] == 1
+
+
+def test_row_state_is_persisted_and_replacement_resets_it(csv_dir: Path) -> None:
+    payload = b"Title,Author\nOne,A\n"
+    info = csv_lists.save_csv_list(payload, "Batch")
+    csv_lists.update_row_state(info.list_id, 2, "complete", task_id="release-1")
+
+    assert csv_lists.list_csv_lists()[0].counts["complete"] == 1
+
+    csv_lists.save_csv_list(payload, "Batch")
+    assert csv_lists.list_csv_lists()[0].counts["not_queued"] == 1
 
 
 def test_provider_exposes_lists_and_preserves_pagination(csv_dir: Path) -> None:

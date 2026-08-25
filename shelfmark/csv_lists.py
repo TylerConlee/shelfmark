@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,10 @@ _AUTHOR_ALIASES = ("author", "authors", "author name")
 _ISBN10_ALIASES = ("isbn", "isbn10", "isbn 10")
 _ISBN13_ALIASES = ("isbn13", "isbn 13")
 _RANK_ALIASES = ("rank", "position")
+CSV_ROW_STATUSES = frozenset(
+    {"not_queued", "searching", "queued", "downloading", "complete", "no_match", "failed"}
+)
+_state_lock = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,8 @@ class CsvListInfo:
     name: str
     filename: str
     book_count: int
+    counts: dict[str, int]
+    processing: bool = False
 
 
 def csv_lists_dir() -> Path:
@@ -100,6 +108,54 @@ def sanitize_list_id(value: str) -> str:
 def _path_for_list(list_id: str) -> Path:
     safe_id = sanitize_list_id(list_id)
     return csv_lists_dir() / f"{safe_id}.csv"
+
+
+def _state_path(list_id: str) -> Path:
+    return _path_for_list(list_id).with_suffix(".state.json")
+
+
+def load_row_states(list_id: str) -> dict[str, dict[str, Any]]:
+    """Load durable row processing state, tolerating missing/old state files."""
+    path = _state_path(list_id)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError, ValueError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): value for key, value in payload.items() if isinstance(value, dict)}
+
+
+def save_row_states(list_id: str, states: dict[str, dict[str, Any]]) -> None:
+    """Atomically persist row processing state."""
+    path = _state_path(list_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    with _state_lock:
+        temporary.write_text(json.dumps(states, indent=2, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+
+
+def update_row_state(list_id: str, row_number: int, status: str, **details: Any) -> None:
+    if status not in CSV_ROW_STATUSES:
+        raise ValueError(f"Unknown CSV row status: {status}")
+    with _state_lock:
+        states = load_row_states(list_id)
+        states[str(row_number)] = {"status": status, **details}
+        save_row_states(list_id, states)
+
+
+def row_status_counts(list_id: str, books: list[CsvListBook]) -> dict[str, int]:
+    states = load_row_states(list_id)
+    counts = dict.fromkeys(CSV_ROW_STATUSES, 0)
+    for book in books:
+        status = states.get(str(book.row_number), {}).get("status", "not_queued")
+        if status not in counts:
+            status = "not_queued"
+        counts[status] += 1
+    return counts
 
 
 def _display_name(list_id: str) -> str:
@@ -168,11 +224,13 @@ def save_csv_list(payload: bytes, name: str) -> CsvListInfo:
     target_dir.mkdir(parents=True, exist_ok=True)
     path = _path_for_list(list_id)
     path.write_bytes(payload)
+    _state_path(list_id).unlink(missing_ok=True)
     return CsvListInfo(
         list_id=list_id,
         name=_display_name(list_id),
         filename=path.name,
         book_count=len(books),
+        counts=row_status_counts(list_id, books),
     )
 
 
@@ -190,6 +248,7 @@ def delete_csv_list(list_id: str) -> bool:
     if not path.exists():
         return False
     path.unlink()
+    _state_path(list_id).unlink(missing_ok=True)
     return True
 
 
@@ -203,7 +262,7 @@ def list_csv_lists() -> list[CsvListInfo]:
     for path in sorted(directory.glob("*.csv"), key=lambda item: item.name.casefold()):
         try:
             books = parse_csv_bytes(path.read_bytes())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         lists.append(
             CsvListInfo(
@@ -211,6 +270,7 @@ def list_csv_lists() -> list[CsvListInfo]:
                 name=_display_name(path.stem),
                 filename=path.name,
                 book_count=len(books),
+                counts=row_status_counts(path.stem, books),
             )
         )
     return lists

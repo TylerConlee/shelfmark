@@ -5,6 +5,8 @@ export interface CsvListInfo {
   name: string;
   filename: string;
   book_count: number;
+  counts: Record<string, number>;
+  processing: boolean;
 }
 
 const CSV_LISTS_URL = `${getApiBase()}/csv-lists`;
@@ -17,7 +19,9 @@ const isCsvListInfo = (value: unknown): value is CsvListInfo =>
   typeof value.id === 'string' &&
   typeof value.name === 'string' &&
   typeof value.filename === 'string' &&
-  typeof value.book_count === 'number';
+  typeof value.book_count === 'number' &&
+  isRecord(value.counts) &&
+  typeof value.processing === 'boolean';
 
 const responseError = async (response: Response): Promise<Error> => {
   let message = `Request failed (${response.status})`;
@@ -64,4 +68,14 @@ export const deleteCsvList = async (listId: string): Promise<void> => {
     credentials: 'same-origin',
   });
   if (!response.ok) throw await responseError(response);
+};
+
+export const queueAllCsvList = async (listId: string): Promise<boolean> => {
+  const response = await fetch(`${CSV_LISTS_URL}/${encodeURIComponent(listId)}/queue-all`, {
+    method: 'POST',
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw await responseError(response);
+  const payload = (await response.json()) as unknown;
+  return isRecord(payload) && payload.started === true;
 };

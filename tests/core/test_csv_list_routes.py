@@ -43,6 +43,16 @@ def test_upload_list_and_delete_csv(app: Flask) -> None:
         "name": "Goodreads 2020s Part 01",
         "filename": "Goodreads-2020s-Part-01.csv",
         "book_count": 2,
+        "counts": {
+            "complete": 0,
+            "downloading": 0,
+            "failed": 0,
+            "no_match": 0,
+            "not_queued": 2,
+            "queued": 0,
+            "searching": 0,
+        },
+        "processing": False,
     }
 
     listing = client.get("/api/csv-lists")
@@ -89,6 +99,42 @@ def test_upload_rejects_non_csv_and_invalid_csv(app: Flask) -> None:
 def test_delete_unknown_list_returns_404(app: Flask) -> None:
     response = app.test_client().delete("/api/csv-lists/no-such-list")
     assert response.status_code == 404
+
+
+def test_queue_all_starts_passive_import_when_explicitly_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(csv_lists, "CONFIG_DIR", str(tmp_path))
+    calls: list[dict] = []
+    flask_app = Flask(__name__)
+    flask_app.secret_key = "test"
+
+    def passthrough(view):
+        return view
+
+    def fake_queue_all(list_id: str, **kwargs) -> bool:
+        calls.append({"list_id": list_id, **kwargs})
+        return True
+
+    monkeypatch.setattr("shelfmark.core.csv_list_routes.queue_all", fake_queue_all)
+    register_csv_list_routes(
+        flask_app,
+        passthrough,
+        queue_release=lambda *_args, **_kwargs: (True, None),
+        load_policy_settings=lambda: {"REQUEST_POLICY_DEFAULT_EBOOK": "download"},
+    )
+    client = flask_app.test_client()
+    client.post(
+        "/api/csv-lists",
+        data={"file": (io.BytesIO(b"Title,Author\nDune,Frank Herbert\n"), "batch.csv")},
+        content_type="multipart/form-data",
+    )
+
+    response = client.post("/api/csv-lists/batch/queue-all")
+
+    assert response.status_code == 202
+    assert response.get_json() == {"started": True, "id": "batch"}
+    assert calls[0]["global_settings"] == {"REQUEST_POLICY_DEFAULT_EBOOK": "download"}
 
 
 def test_admin_routes_register_csv_management(

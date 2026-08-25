@@ -192,7 +192,13 @@ try:
     from shelfmark.core.self_user_routes import register_self_user_routes
 
     register_oidc_routes(app, user_db)
-    register_admin_routes(app, user_db)
+    register_admin_routes(
+        app,
+        user_db,
+        queue_release=backend.queue_release,
+        queue_status=backend.queue_status,
+        load_policy_settings=load_users_request_policy_settings,
+    )
     register_self_user_routes(app, user_db)
 except (sqlite3.OperationalError, OSError) as e:
     logger.warning(
