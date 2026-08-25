@@ -500,12 +500,12 @@ def get_provider_kwargs(provider_name: str) -> dict:
 
 
 def is_provider_registered(provider_name: str) -> bool:
-    """Check if a provider is registered."""
+    """Check if provider exists."""
     return provider_name in _PROVIDERS
 
 
 def is_provider_enabled(provider_name: str) -> bool:
-    """Check if a provider is enabled in settings."""
+    """Check if provider is enabled in settings."""
     from shelfmark.core.config import config as app_config
 
     # Refresh config to get latest settings
@@ -712,3 +712,6 @@ with suppress(ImportError):
 
 with suppress(ImportError):
     from shelfmark.metadata_providers import moly as moly
+
+with suppress(ImportError):
+    from shelfmark.metadata_providers import csvlists as csvlists
