@@ -108,7 +108,7 @@ class CsvListsProvider(MetadataProvider):
 
         try:
             rows = load_csv_list(list_id)
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError, ValueError:
             return SearchResult(books=[], page=options.page, total_found=0, has_more=False)
 
         query = options.query.strip().casefold()
@@ -149,7 +149,7 @@ class CsvListsProvider(MetadataProvider):
         for info in list_csv_lists():
             try:
                 rows = load_csv_list(info.list_id)
-            except (FileNotFoundError, ValueError):
+            except FileNotFoundError, ValueError:
                 continue
             for row in rows:
                 if query in row.title.casefold() or query in row.author.casefold():
@@ -166,7 +166,7 @@ class CsvListsProvider(MetadataProvider):
         try:
             row_number = int(row_text)
             rows = load_csv_list(list_id)
-        except (FileNotFoundError, TypeError, ValueError):
+        except FileNotFoundError, TypeError, ValueError:
             return None
 
         row = next((item for item in rows if item.row_number == row_number), None)
@@ -181,7 +181,7 @@ class CsvListsProvider(MetadataProvider):
         for info in list_csv_lists():
             try:
                 rows = load_csv_list(info.list_id)
-            except (FileNotFoundError, ValueError):
+            except FileNotFoundError, ValueError:
                 continue
             for row in rows:
                 if normalized in {row.isbn_10, row.isbn_13}:
