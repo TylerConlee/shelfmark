@@ -84,6 +84,7 @@ from shelfmark.core.requests_service import (
 )
 from shelfmark.core.user_db import UserDB
 from shelfmark.core.utils import AUDIOBOOK_FORMATS, normalize_base_path
+from shelfmark.csv_lists import list_queued_csv_rows
 from shelfmark.download import orchestrator as backend
 from shelfmark.download import warmup
 from shelfmark.release_sources import (
@@ -1990,6 +1991,19 @@ def api_queue_order() -> Response | tuple[Response, int]:
                     actor_username=actor_username,
                 )
             ]
+        live_task_ids = {str(item.get("id", "")) for item in queue_order}
+        next_priority = len(queue_order)
+        for csv_item in list_queued_csv_rows():
+            if str(csv_item["id"]) in live_task_ids:
+                continue
+            queue_order.append(
+                {
+                    **csv_item,
+                    "priority": next_priority,
+                    "added_time": 0,
+                }
+            )
+            next_priority += 1
         return jsonify({"queue": queue_order})
     except _OPERATIONAL_ERRORS as e:
         logger.error_trace(f"Queue order error: {e}")

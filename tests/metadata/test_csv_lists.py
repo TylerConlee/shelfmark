@@ -95,6 +95,26 @@ def test_row_state_is_persisted_and_replacement_resets_it(csv_dir: Path) -> None
     assert csv_lists.list_csv_lists()[0].counts["not_queued"] == 1
 
 
+def test_list_queued_csv_rows_returns_only_persisted_backlog(csv_dir: Path) -> None:
+    info = csv_lists.save_csv_list(b"Title,Author\nOne,A\nTwo,B\n", "Reading Batch")
+    csv_lists.update_row_state(info.list_id, 2, "queued", task_id="release-1")
+    csv_lists.update_row_state(info.list_id, 3, "complete", task_id="release-2")
+
+    assert csv_lists.list_queued_csv_rows() == [
+        {
+            "id": "release-1",
+            "title": "One",
+            "author": "A",
+            "status": "queued",
+            "source": "csv",
+            "csv_list_id": "Reading-Batch",
+            "csv_list_name": "Reading Batch",
+            "csv_row_number": 2,
+            "removable": False,
+        }
+    ]
+
+
 def test_provider_exposes_lists_and_preserves_pagination(csv_dir: Path) -> None:
     csv_lists.save_csv_list(
         b"Title,Author,Rank\nOne,Author A,1\nTwo,Author B,2\nThree,Author C,3\n",

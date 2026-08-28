@@ -81,18 +81,22 @@ export const QueuePage = ({ onBack, onQueueChanged }: QueuePageProps) => {
                 {item.author || 'Unknown author'}
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                Queued {formatQueuedTime(item.added_time)}
+                {item.source === 'csv' && item.csv_list_name
+                  ? `Queued from ${item.csv_list_name}`
+                  : `Queued ${formatQueuedTime(item.added_time)}`}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => void handleCancel(item)}
-              disabled={cancellingId === item.id}
-              className="hover-action shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-red-600 disabled:opacity-50 dark:text-red-400"
-              aria-label={`Remove ${item.title || 'Untitled'} from queue`}
-            >
-              {cancellingId === item.id ? 'Removing…' : 'Remove'}
-            </button>
+            {item.removable !== false && (
+              <button
+                type="button"
+                onClick={() => void handleCancel(item)}
+                disabled={cancellingId === item.id}
+                className="hover-action shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-red-600 disabled:opacity-50 dark:text-red-400"
+                aria-label={`Remove ${item.title || 'Untitled'} from queue`}
+              >
+                {cancellingId === item.id ? 'Removing…' : 'Remove'}
+              </button>
+            )}
           </li>
         ))}
       </ol>

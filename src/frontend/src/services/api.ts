@@ -538,6 +538,9 @@ export interface QueueOrderItem {
   priority: number;
   added_time: number;
   status: string;
+  source?: string;
+  csv_list_name?: string;
+  removable?: boolean;
 }
 
 export const getQueueOrder = async (): Promise<QueueOrderItem[]> => {

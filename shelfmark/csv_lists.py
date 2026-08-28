@@ -274,3 +274,28 @@ def list_csv_lists() -> list[CsvListInfo]:
             )
         )
     return lists
+
+
+def list_queued_csv_rows() -> list[dict[str, Any]]:
+    """Return durable CSV rows still marked as queued, in stable list/row order."""
+    queued: list[dict[str, Any]] = []
+    for item in list_csv_lists():
+        states = load_row_states(item.list_id)
+        for book in load_csv_list(item.list_id):
+            state = states.get(str(book.row_number), {})
+            if state.get("status") != "queued":
+                continue
+            queued.append(
+                {
+                    "id": str(state.get("task_id") or f"csv:{item.list_id}:{book.row_number}"),
+                    "title": book.title,
+                    "author": book.author,
+                    "status": "queued",
+                    "source": "csv",
+                    "csv_list_id": item.list_id,
+                    "csv_list_name": item.name,
+                    "csv_row_number": book.row_number,
+                    "removable": False,
+                }
+            )
+    return queued
