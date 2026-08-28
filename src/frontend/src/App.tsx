@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 import { useState, useCallback, useRef, useMemo } from 'react';
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 
 import { ActivitySidebar } from './components/activity';
 import { AdvancedFilters } from './components/AdvancedFilters';
@@ -43,6 +43,7 @@ import { useToast } from './hooks/useToast';
 import { useUrlSearch } from './hooks/useUrlSearch';
 import { primeUsersCache } from './hooks/useUsersFetch';
 import { LoginPage } from './pages/LoginPage';
+import { QueuePage } from './pages/QueuePage';
 import {
   getSourceRecordInfo,
   getMetadataBookInfo,
@@ -260,6 +261,7 @@ const AdminSettingsWarmupMount = () => {
 
 function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { toasts, showToast, removeToast } = useToast();
   const { socket } = useSocket();
 
@@ -2388,6 +2390,7 @@ function App() {
           searchInputLabel={activeQueryValueLabel}
           onSearchChange={handleActiveQueryValueChange}
           onDownloadsClick={toggleDownloadsSidebar}
+          onQueueClick={() => void navigate('/queue')}
           onSettingsClick={handleSettingsClick}
           isAdmin={requestRoleIsAdmin}
           canAccessSettings={isAuthenticated}
@@ -2844,8 +2847,12 @@ function App() {
   const shouldRedirectFromLogin = !authRequired || isAuthenticated;
   const postLoginPath = getReturnToFromSearch(location.search);
   const loginRedirectPath = buildLoginRedirectPath(location);
-  const appElement =
-    authRequired && !isAuthenticated ? <Navigate to={loginRedirectPath} replace /> : mainAppContent;
+  let appElement = mainAppContent;
+  if (authRequired && !isAuthenticated) {
+    appElement = <Navigate to={loginRedirectPath} replace />;
+  } else if (location.pathname === '/queue') {
+    appElement = <QueuePage onBack={() => void navigate('/')} onQueueChanged={fetchStatus} />;
+  }
 
   return (
     <>

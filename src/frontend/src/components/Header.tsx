@@ -35,6 +35,7 @@ interface HeaderProps {
   isAdvancedActive?: boolean;
   isLoading?: boolean;
   onDownloadsClick?: () => void;
+  onQueueClick?: () => void;
   onSettingsClick?: () => void;
   isAdmin?: boolean;
   canAccessSettings?: boolean;
@@ -105,6 +106,7 @@ export const Header = forwardRef<HeaderHandle, HeaderProps>(
       isAdvancedActive = false,
       isLoading = false,
       onDownloadsClick,
+      onQueueClick,
       onSettingsClick,
       isAdmin = false,
       canAccessSettings,
@@ -376,6 +378,32 @@ export const Header = forwardRef<HeaderHandle, HeaderProps>(
         )}
 
         {/* Activity Button */}
+        {onQueueClick && (
+          <button
+            type="button"
+            onClick={onQueueClick}
+            className="hover-action flex items-center gap-2 rounded-full px-3 py-2 text-gray-900 transition-all duration-200 dark:text-gray-100"
+            aria-label="View download queue"
+            title="Queue"
+          >
+            <svg
+              className="h-5 w-5"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth="1.5"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3.75 6.75h16.5M3.75 12h10.5m-10.5 5.25h7.5"
+              />
+            </svg>
+            <span className="hidden text-sm font-medium sm:inline">Queue</span>
+          </button>
+        )}
+
         {onDownloadsClick && (
           <button
             type="button"

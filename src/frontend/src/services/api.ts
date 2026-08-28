@@ -531,6 +531,20 @@ export const getStatus = async (): Promise<StatusData> => {
   return fetchJSON<StatusData>(API.status);
 };
 
+export interface QueueOrderItem {
+  id: string;
+  title: string;
+  author?: string;
+  priority: number;
+  added_time: number;
+  status: string;
+}
+
+export const getQueueOrder = async (): Promise<QueueOrderItem[]> => {
+  const response = await fetchJSON<{ queue?: QueueOrderItem[] }>(`${API_BASE}/queue/order`);
+  return Array.isArray(response.queue) ? response.queue : [];
+};
+
 export const getActivitySnapshot = async (): Promise<ActivitySnapshotResponse> => {
   return fetchJSON<ActivitySnapshotResponse>(API.activitySnapshot);
 };
