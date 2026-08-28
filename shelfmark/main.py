@@ -1527,6 +1527,46 @@ backend.book_queue.set_queue_hook(_record_download_queued)
 backend.book_queue.set_terminal_status_hook(_record_download_terminal_snapshot)
 
 
+def _restore_persisted_active_downloads() -> None:
+    """Rebuild the in-memory queue after a process or container restart."""
+    if download_history_service is None:
+        return
+
+    restored = 0
+    skipped = 0
+    try:
+        active_rows = download_history_service.list_active()
+    except _OPERATIONAL_ERRORS as exc:
+        logger.warning("Failed to load persisted active downloads at startup: %s", exc)
+        return
+
+    for row in active_rows:
+        task_id = str(row.get("task_id") or "")
+        if not task_id or backend.book_queue.get_task(task_id) is not None:
+            continue
+        success, error = backend.retry_persisted_download(
+            row.get("retry_payload"),
+            final_status=row.get("final_status"),
+            priority=0,
+        )
+        if success:
+            restored += 1
+            continue
+        skipped += 1
+        logger.warning("Could not restore persisted download %s: %s", task_id, error)
+
+    if active_rows:
+        logger.info(
+            "Persisted download recovery complete: restored=%s skipped=%s total=%s",
+            restored,
+            skipped,
+            len(active_rows),
+        )
+
+
+_restore_persisted_active_downloads()
+
+
 def _emit_request_update_events(updated_requests: list[dict[str, Any]]) -> None:
     """Broadcast request_update events for rows changed by delivery-state sync."""
     if not updated_requests or ws_manager is None:
