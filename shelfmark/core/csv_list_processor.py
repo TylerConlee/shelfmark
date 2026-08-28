@@ -69,7 +69,11 @@ def _process_list(
     try:
         for row in load_csv_list(list_id):
             current = load_row_states(list_id).get(str(row.row_number), {})
-            if current.get("status") in {"searching", "queued", "downloading", "complete"}:
+            # A persisted "searching" row means the prior worker was interrupted (for
+            # example by a container restart). It is safe to retry because a live worker
+            # visits each row only once. Queued/downloading/complete rows still belong to
+            # the download pipeline and must not be submitted twice.
+            if current.get("status") in {"queued", "downloading", "complete"}:
                 continue
             update_row_state(list_id, row.row_number, "searching")
             try:

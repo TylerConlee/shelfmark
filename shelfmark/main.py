@@ -84,7 +84,7 @@ from shelfmark.core.requests_service import (
 )
 from shelfmark.core.user_db import UserDB
 from shelfmark.core.utils import AUDIOBOOK_FORMATS, normalize_base_path
-from shelfmark.csv_lists import list_queued_csv_rows
+from shelfmark.csv_lists import list_queued_csv_rows, update_row_state
 from shelfmark.download import orchestrator as backend
 from shelfmark.download import warmup
 from shelfmark.release_sources import (
@@ -1994,7 +1994,29 @@ def api_queue_order() -> Response | tuple[Response, int]:
         live_task_ids = {str(item.get("id", "")) for item in queue_order}
         next_priority = len(queue_order)
         for csv_item in list_queued_csv_rows():
-            if str(csv_item["id"]) in live_task_ids:
+            task_id = str(csv_item["id"])
+            if task_id in live_task_ids:
+                continue
+            # CSV row state predates the durable download-history table and can remain
+            # "queued" after a download has already reached a terminal state. Reconcile
+            # it here so the queue page shows work that is actually pending, not history.
+            history_row = (
+                download_history_service.get_by_task_id(task_id)
+                if download_history_service is not None
+                else None
+            )
+            final_status = str((history_row or {}).get("final_status") or "").lower()
+            if final_status in {"complete", "error", "cancelled"}:
+                update_row_state(
+                    str(csv_item["csv_list_id"]),
+                    int(csv_item["csv_row_number"]),
+                    "complete" if final_status == "complete" else "failed",
+                    error=(
+                        None
+                        if final_status == "complete"
+                        else f"Download finished with status: {final_status}"
+                    ),
+                )
                 continue
             queue_order.append(
                 {
