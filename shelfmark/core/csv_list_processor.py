@@ -6,6 +6,7 @@ import threading
 from dataclasses import asdict
 from typing import Any, Callable
 
+from shelfmark.core.grimmory_library import find_grimmory_match
 from shelfmark.core.models import QueueStatus
 from shelfmark.core.request_policy import PolicyMode, resolve_policy_mode
 from shelfmark.core.search_plan import build_release_search_plan
@@ -74,6 +75,23 @@ def _process_list(
             update_row_state(list_id, row.row_number, "searching")
             try:
                 book = provider._to_metadata(list_id, row)
+                library_match = find_grimmory_match(
+                    title=book.title,
+                    authors=book.authors,
+                    isbn_10=book.isbn_10,
+                    isbn_13=book.isbn_13,
+                    user_id=user_id,
+                )
+                if library_match is not None:
+                    update_row_state(
+                        list_id,
+                        row.row_number,
+                        "complete",
+                        completion_reason="already_in_library",
+                        status_message="Already in Grimmory library",
+                        library_book_id=library_match.book_id,
+                    )
+                    continue
                 matches: list[Any] = []
                 search_errors: list[str] = []
                 # Source ordering, format/language filtering and result ranking are owned by

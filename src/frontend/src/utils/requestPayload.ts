@@ -91,6 +91,9 @@ export const buildReleaseDataFromMetadataRelease = (
     series_count: book.series_count,
     subtitle: book.subtitle,
     language: release.language,
+    isbn_10: book.isbn_10,
+    isbn_13: book.isbn_13,
+    authors: book.authors,
     ...(isSourceBackedReleaseContext ? { search_mode: 'direct' as const } : {}),
   };
 };
@@ -110,6 +113,9 @@ export const buildReleaseDataFromDirectBook = (book: Book) => {
     // Browsing a source directly means the book record IS the release record.
     language: book.language,
     search_mode: 'direct' as const,
+    isbn_10: book.isbn_10,
+    isbn_13: book.isbn_13,
+    authors: book.authors,
   };
 };
 

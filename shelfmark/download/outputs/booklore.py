@@ -209,6 +209,28 @@ def booklore_list_libraries(booklore_config: BookloreConfig, token: str) -> list
         raise BookloreError(msg) from exc
 
 
+def booklore_list_books(booklore_config: BookloreConfig, token: str) -> list[dict[str, Any]]:
+    """Fetch all books visible to the configured Grimmory user."""
+    url = f"{booklore_config.base_url}/api/v1/books"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        response = requests.get(url, headers=headers, timeout=30, verify=booklore_config.verify_tls)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        msg = f"Failed to fetch {BOOKLORE_DISPLAY_NAME} books: {exc}"
+        raise BookloreError(msg) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        msg = f"Invalid {BOOKLORE_DISPLAY_NAME} books response"
+        raise BookloreError(msg) from exc
+    if not isinstance(payload, list):
+        msg = f"Invalid {BOOKLORE_DISPLAY_NAME} books response"
+        raise BookloreError(msg)
+    return [item for item in payload if isinstance(item, dict)]
+
+
 def booklore_upload_file(booklore_config: BookloreConfig, token: str, file_path: Path) -> None:
     """Upload a completed file into Booklore."""
     if booklore_config.upload_to_bookdrop:
@@ -396,6 +418,10 @@ def _post_process_booklore(
                 booklore_refresh_library(booklore_config, token)
             except BookloreError as e:
                 logger.warning("Task %s: Booklore refresh failed: %s", task.task_id, e)
+
+        from shelfmark.core.grimmory_library import invalidate_grimmory_library_cache
+
+        invalidate_grimmory_library_cache()
 
         logger.info(
             "Task %s: uploaded %d file(s) to Booklore",

@@ -56,6 +56,8 @@ export interface Book {
   titles_by_language?: Record<string, string>;
   username?: string;
   retry_available?: boolean;
+  in_library?: boolean;
+  library_book_id?: number;
 }
 
 // Status response types

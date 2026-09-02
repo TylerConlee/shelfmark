@@ -85,12 +85,14 @@ export const DetailsModal = ({
   // Determine if this is a metadata book (Universal mode) vs a release (Direct Download)
   const isMetadata = isMetadataBook(book);
   const showBookSourceLink = Boolean(book.source_url) && (isMetadata || showReleaseSourceLinks);
-  const metadataActionText =
-    isMetadata && buttonState.state === 'download' && buttonState.text === 'Get'
-      ? 'Find Downloads'
-      : buttonState.text;
+  let actionText = buttonState.text;
+  if (book.in_library) {
+    actionText = 'Already in library';
+  } else if (isMetadata && buttonState.state === 'download' && buttonState.text === 'Get') {
+    actionText = 'Find Downloads';
+  }
   const downloadButtonClassName = (() => {
-    if (buttonState.state === 'blocked') {
+    if (book.in_library || buttonState.state === 'blocked') {
       return 'bg-gray-500';
     }
     return isMetadata ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-sky-700 hover:bg-sky-800';
@@ -412,13 +414,16 @@ export const DetailsModal = ({
                     void handleDownload();
                   }}
                   disabled={
-                    isMetadata ? buttonState.state === 'blocked' : buttonState.state !== 'download'
+                    book.in_library ||
+                    (isMetadata
+                      ? buttonState.state === 'blocked'
+                      : buttonState.state !== 'download')
                   }
                   className={`rounded-lg px-5 py-2 text-sm font-medium text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                     downloadButtonClassName
                   }`}
                 >
-                  {isMetadata ? metadataActionText : buttonState.text}
+                  {actionText}
                 </button>
               </div>
             </div>

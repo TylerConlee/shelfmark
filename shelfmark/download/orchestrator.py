@@ -15,6 +15,7 @@ from threading import Event, Lock
 from typing import TYPE_CHECKING, Any
 
 from shelfmark.core.config import config
+from shelfmark.core.grimmory_library import ALREADY_IN_LIBRARY_ERROR, find_grimmory_match
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import DownloadTask, QueueStatus, SearchMode
 from shelfmark.core.queue import book_queue
@@ -249,6 +250,27 @@ def queue_release(
         year = release_data.get("year") or extra.get("year")
         preview = release_data.get("preview") or extra.get("preview")
         content_type = release_data.get("content_type") or extra.get("content_type")
+        raw_authors = release_data.get("authors")
+        identity_authors = (
+            [str(value) for value in raw_authors]
+            if isinstance(raw_authors, list)
+            else [str(author)] if author else []
+        )
+        library_match = find_grimmory_match(
+            title=str(release_data.get("title") or ""),
+            authors=identity_authors,
+            isbn_10=release_data.get("isbn_10") or extra.get("isbn_10"),
+            isbn_13=release_data.get("isbn_13") or extra.get("isbn_13"),
+            user_id=user_id,
+        )
+        if library_match is not None:
+            logger.info(
+                "Rejected duplicate download for %s; Grimmory book id=%s matched_by=%s",
+                release_data.get("title"),
+                library_match.book_id,
+                library_match.matched_by,
+            )
+            return False, ALREADY_IN_LIBRARY_ERROR
         source_url_raw = (
             release_data.get("download_url")
             or release_data.get("source_url")

@@ -34,13 +34,16 @@ export function BookActionButton({
   style,
 }: BookActionButtonProps) {
   const { searchMode } = useSearchMode();
+  const effectiveButtonState: ButtonStateInfo = book.in_library
+    ? { text: 'Already in library', state: 'blocked' }
+    : buttonState;
 
   if (searchMode === 'universal') {
     return (
       <BookGetButton
         book={book}
         onGetReleases={onGetReleases}
-        buttonState={buttonState}
+        buttonState={effectiveButtonState}
         isLoading={isLoadingReleases}
         size={size}
         variant={variant}
@@ -53,14 +56,14 @@ export function BookActionButton({
 
   return (
     <BookDownloadButton
-      buttonState={buttonState}
+      buttonState={effectiveButtonState}
       onDownload={() => onDownload(book)}
       size={size}
       variant={variant === 'default' ? 'primary' : 'icon'}
       fullWidth={fullWidth}
       className={className}
       style={style}
-      ariaLabel={buttonState.text}
+      ariaLabel={effectiveButtonState.text}
     />
   );
 }

@@ -1,6 +1,10 @@
 from unittest.mock import MagicMock, patch
 
-from shelfmark.download.outputs.booklore import BookloreConfig, booklore_upload_file
+from shelfmark.download.outputs.booklore import (
+    BookloreConfig,
+    booklore_list_books,
+    booklore_upload_file,
+)
 
 
 def _booklore_config(upload_to_bookdrop: bool) -> BookloreConfig:
@@ -51,3 +55,23 @@ def test_booklore_upload_file_uses_bookdrop_endpoint_without_query_params(tmp_pa
     assert args[0] == "http://booklore:6060/api/v1/files/upload/bookdrop"
     assert kwargs["params"] is None
     assert kwargs["headers"] == {"Authorization": "Bearer token"}
+
+
+def test_booklore_list_books_uses_authenticated_library_endpoint():
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = [{"id": 42, "metadata": {"title": "Dune"}}]
+
+    with patch(
+        "shelfmark.download.outputs.booklore.requests.get",
+        return_value=response,
+    ) as mock_get:
+        books = booklore_list_books(_booklore_config(upload_to_bookdrop=False), "token")
+
+    assert books == [{"id": 42, "metadata": {"title": "Dune"}}]
+    mock_get.assert_called_once_with(
+        "http://booklore:6060/api/v1/books",
+        headers={"Authorization": "Bearer token"},
+        timeout=30,
+        verify=True,
+    )

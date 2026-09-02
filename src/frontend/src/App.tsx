@@ -1103,6 +1103,9 @@ function App() {
         // From the release, never the book: book.language is the provider's
         // canonical edition, which would mislabel a translated release.
         language: release.language ?? undefined,
+        isbn_10: book.isbn_10,
+        isbn_13: book.isbn_13,
+        authors: book.authors,
       };
     },
     [],

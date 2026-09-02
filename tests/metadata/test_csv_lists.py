@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from shelfmark import csv_lists
+from shelfmark.core import csv_list_processor
+from shelfmark.core.grimmory_library import GrimmoryMatch
 from shelfmark.metadata_providers import MetadataSearchOptions
 from shelfmark.metadata_providers.csvlists import CsvListsProvider
 
@@ -155,3 +157,35 @@ def test_provider_get_book_uses_stable_row_id(csv_dir: Path) -> None:
     assert book.title == "Four"
     assert book.authors == ["Author D"]
     assert book.provider_id == "Batch:2"
+
+
+def test_csv_processor_completes_book_already_in_grimmory(
+    csv_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = csv_lists.save_csv_list(
+        b"Title,Author,ISBN13\nThe Body in the Library,Agatha Christie,9780062073617\n",
+        "Existing Books",
+    )
+    monkeypatch.setattr(
+        csv_list_processor,
+        "find_grimmory_match",
+        lambda **_kwargs: GrimmoryMatch(8936, "The Body in the Library", "isbn"),
+    )
+    queued: list[dict] = []
+
+    csv_list_processor._process_list(
+        info.list_id,
+        queue_release=lambda payload, *_args, **_kwargs: (queued.append(payload) is None, None),
+        global_settings={},
+        user_id=1,
+        username="admin",
+    )
+
+    state = csv_lists.load_row_states(info.list_id)["2"]
+    assert queued == []
+    assert state == {
+        "status": "complete",
+        "completion_reason": "already_in_library",
+        "status_message": "Already in Grimmory library",
+        "library_book_id": 8936,
+    }

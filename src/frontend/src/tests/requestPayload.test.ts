@@ -78,6 +78,26 @@ describe('requestPayload utilities', () => {
     expect(sourceBackedReleaseData.search_mode).toBe('direct');
   });
 
+  it('carries book identity into download payloads for duplicate protection', () => {
+    const book = {
+      ...baseBook,
+      isbn_10: '0441172717',
+      isbn_13: '9780441172719',
+      authors: ['Frank Herbert'],
+    };
+
+    expect(buildReleaseDataFromMetadataRelease(book, baseRelease, 'ebook')).toMatchObject({
+      isbn_10: '0441172717',
+      isbn_13: '9780441172719',
+      authors: ['Frank Herbert'],
+    });
+    expect(buildReleaseDataFromDirectBook(book)).toMatchObject({
+      isbn_10: '0441172717',
+      isbn_13: '9780441172719',
+      authors: ['Frank Herbert'],
+    });
+  });
+
   it('resolves browse source from source-backed or provider-backed books', () => {
     expect(getBrowseSource(baseBook)).toBe('direct_download');
     expect(
