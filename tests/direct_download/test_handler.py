@@ -146,3 +146,43 @@ def test_direct_download_handler_removes_partial_file_when_cancelled_after_downl
     assert result is None
     assert not expected_path.exists()
     assert status_updates[-1] == ("cancelled", "Cancelled")
+
+
+def test_direct_download_handler_preserves_last_specific_failure(monkeypatch, tmp_path):
+    status_updates: list[tuple[str, str | None]] = []
+
+    def fake_download_book(book_info, book_path, progress_callback, cancel_flag, status_callback):
+        status_callback("error", "Bypass failed: OSError: No space left on device")
+        status_callback("error", "All sources failed")
+        return None
+
+    import shelfmark.release_sources.direct_download as dd
+
+    monkeypatch.setattr(dd, "_download_book", fake_download_book)
+    monkeypatch.setattr(dd, "TMP_DIR", tmp_path)
+    monkeypatch.setattr(
+        dd.config,
+        "get",
+        lambda key, default=None: "rename" if key == "FILE_ORGANIZATION" else default,
+    )
+    monkeypatch.setattr(dd.network, "dns_interference_detected", lambda: False)
+
+    task = DownloadTask(
+        task_id="detailed-failure",
+        source="direct_download",
+        title="Failed Book",
+        format="epub",
+    )
+
+    result = DirectDownloadHandler().download(
+        task,
+        Event(),
+        lambda _progress: None,
+        lambda status, message: status_updates.append((status, message)),
+    )
+
+    assert result is None
+    assert status_updates[-1] == (
+        "error",
+        "All download sources failed. Last error: Bypass failed: OSError: No space left on device",
+    )

@@ -2091,6 +2091,18 @@ class DirectDownloadHandler(DownloadHandler):
         handle bypass, move to final location.
         """
         try:
+            last_failure_detail: str | None = None
+
+            def track_status(status: str, message: str | None) -> None:
+                nonlocal last_failure_detail
+                normalized = message.strip() if isinstance(message, str) else ""
+                if status == "error" and normalized not in {
+                    "All sources failed",
+                    "All download sources failed",
+                }:
+                    last_failure_detail = normalized
+                status_callback(status, message)
+
             logger.debug("Starting download: %s", book_info.title)
 
             # Prepare paths - use descriptive staging filename, orchestrator will rename
@@ -2116,7 +2128,7 @@ class DirectDownloadHandler(DownloadHandler):
             # Execute download via _download_book (handles cascade and bypass)
             status_callback("resolving", "Finding download source")
             success_url = _download_book(
-                book_info, book_path, progress_callback, cancel_flag, status_callback
+                book_info, book_path, progress_callback, cancel_flag, track_status
             )
 
             # Check for cancellation after download
@@ -2135,7 +2147,10 @@ class DirectDownloadHandler(DownloadHandler):
                         "Anna's Archive. Enable DNS-over-HTTPS in settings.",
                     )
                 else:
-                    status_callback("error", "All download sources failed")
+                    message = "All download sources failed"
+                    if last_failure_detail:
+                        message = f"{message}. Last error: {last_failure_detail}"
+                    status_callback("error", message)
                 return None
 
             # Return temp path - orchestrator handles post-processing (archive extraction, ingest)
