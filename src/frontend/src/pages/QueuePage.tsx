@@ -1,10 +1,12 @@
 import { useCallback, useState } from 'react';
 
+import { PageNavigation } from '../components/PageNavigation';
 import { useMountEffect } from '../hooks/useMountEffect';
 import { cancelDownload, getQueueOrder, type QueueOrderItem } from '../services/api';
 
 interface QueuePageProps {
-  onBack: () => void;
+  onNavigate: (path: '/' | '/queue' | '/activity') => void;
+  libraryUrl?: string;
   onQueueChanged?: () => Promise<void> | void;
 }
 
@@ -16,7 +18,7 @@ const formatQueuedTime = (timestamp: number): string => {
   }).format(new Date(timestamp * 1000));
 };
 
-export const QueuePage = ({ onBack, onQueueChanged }: QueuePageProps) => {
+export const QueuePage = ({ onNavigate, libraryUrl, onQueueChanged }: QueuePageProps) => {
   const [items, setItems] = useState<QueueOrderItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -107,14 +109,8 @@ export const QueuePage = ({ onBack, onQueueChanged }: QueuePageProps) => {
     <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <button
-            type="button"
-            onClick={onBack}
-            className="hover-action mb-3 inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm"
-          >
-            <span aria-hidden="true">←</span> Back to search
-          </button>
-          <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+          <PageNavigation active="queue" onNavigate={onNavigate} libraryUrl={libraryUrl} />
+          <h1 className="mt-5 text-2xl font-semibold text-slate-900 dark:text-slate-100">
             Download queue
           </h1>
           <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
