@@ -42,6 +42,7 @@ import { primeSettingsCache } from './hooks/useSettings';
 import { useToast } from './hooks/useToast';
 import { useUrlSearch } from './hooks/useUrlSearch';
 import { primeUsersCache } from './hooks/useUsersFetch';
+import { ActivityPage } from './pages/ActivityPage';
 import { LoginPage } from './pages/LoginPage';
 import { QueuePage } from './pages/QueuePage';
 import {
@@ -647,14 +648,6 @@ function App() {
     setDownloadsSidebarOpen(true);
     prefetchActivityHistory();
   }, [prefetchActivityHistory]);
-  const toggleDownloadsSidebar = useCallback(() => {
-    if (downloadsSidebarOpen) {
-      setDownloadsSidebarOpen(false);
-      return;
-    }
-    setDownloadsSidebarOpen(true);
-    prefetchActivityHistory();
-  }, [downloadsSidebarOpen, prefetchActivityHistory]);
   const handleSettingsClick = useCallback(() => {
     if (config?.settings_enabled) {
       if (authIsAdmin) {
@@ -2392,7 +2385,7 @@ function App() {
           searchInput={activeQueryValue}
           searchInputLabel={activeQueryValueLabel}
           onSearchChange={handleActiveQueryValueChange}
-          onDownloadsClick={toggleDownloadsSidebar}
+          onDownloadsClick={() => void navigate('/activity')}
           onQueueClick={() => void navigate('/queue')}
           onSettingsClick={handleSettingsClick}
           isAdmin={requestRoleIsAdmin}
@@ -2854,7 +2847,26 @@ function App() {
   if (authRequired && !isAuthenticated) {
     appElement = <Navigate to={loginRedirectPath} replace />;
   } else if (location.pathname === '/queue') {
-    appElement = <QueuePage onBack={() => void navigate('/')} onQueueChanged={fetchStatus} />;
+    appElement = (
+      <QueuePage
+        onNavigate={(path) => void navigate(path)}
+        libraryUrl={config?.calibre_web_url || ''}
+        onQueueChanged={fetchStatus}
+      />
+    );
+  } else if (location.pathname === '/activity') {
+    appElement = (
+      <ActivityPage
+        status={activitySidebarStatus}
+        isAdmin={requestRoleIsAdmin}
+        libraryUrl={config?.calibre_web_url || ''}
+        onNavigate={(path) => void navigate(path)}
+        onClearCompleted={handleClearCompleted}
+        onCancel={(id) => void handleCancel(id)}
+        onRetry={(id) => void handleRetry(id)}
+        onDismiss={(id) => handleDownloadDismiss(id)}
+      />
+    );
   }
 
   return (

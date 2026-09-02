@@ -562,7 +562,7 @@ export const ActivityCard = ({
     }
 
     return () => observer.disconnect();
-  }, [item.title, item.author, isRequestDetailsOpen, isRequestRejectOpen]);
+  });
 
   const reviewRecord = item.requestRecord;
   const reviewApproveHandler = onRequestReviewApprove || onRequestApprove;
@@ -792,6 +792,18 @@ export const ActivityCard = ({
               {noteLine}
             </p>
           )}
+
+          {(item.visualStatus === 'error' || item.visualStatus === 'cancelled') &&
+            item.statusDetail && (
+              <div className="mt-2 rounded-md bg-red-50 px-2.5 py-2 text-xs leading-relaxed text-red-800 dark:bg-red-950/40 dark:text-red-200">
+                <span className="font-semibold">
+                  {item.visualStatus === 'cancelled'
+                    ? 'Cancellation details: '
+                    : 'Failure details: '}
+                </span>
+                {item.statusDetail}
+              </div>
+            )}
 
           <div className="mt-1.5 flex min-w-0 items-center gap-2">
             {model.badges.map((badge, index) => {
