@@ -53,6 +53,10 @@ from shelfmark.core.config import config as app_config
 from shelfmark.core.cwa_user_sync import upsert_cwa_user
 from shelfmark.core.download_history_service import DownloadHistoryService
 from shelfmark.core.external_user_linking import upsert_external_user
+from shelfmark.core.grimmory_library import (
+    ALREADY_IN_LIBRARY_ERROR,
+    annotate_books_with_grimmory_status,
+)
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.models import TERMINAL_QUEUE_STATUSES, QueueStatus, SearchFilters
 from shelfmark.core.notifications import (
@@ -1095,6 +1099,8 @@ def api_download_release() -> Response | tuple[Response, int]:
 
         if success:
             return jsonify({"status": "queued", "priority": priority})
+        if error_msg == ALREADY_IN_LIBRARY_ERROR:
+            return jsonify({"error": error_msg, "code": "already_in_library"}), 409
         return jsonify({"error": error_msg or "Failed to queue release"}), 500
     except _OPERATIONAL_ERRORS as e:
         logger.error_trace(f"Release download error: {e}")
@@ -2656,6 +2662,7 @@ def api_metadata_search() -> Response | tuple[Response, int]:
 
         # Convert BookMetadata objects to dicts
         books_data = [asdict(book) for book in search_result.books]
+        annotate_books_with_grimmory_status(books_data, user_id=db_user_id)
 
         # Transform cover_url to local proxy URLs when caching is enabled
         from shelfmark.core.utils import transform_cover_url
@@ -2772,6 +2779,7 @@ def api_metadata_book(provider: str, book_id: str) -> Response | tuple[Response,
             return jsonify({"error": "Book not found"}), 404
 
         book_dict = asdict(book)
+        annotate_books_with_grimmory_status([book_dict], user_id=get_session_db_user_id(session))
 
         # Transform cover_url to local proxy URL when caching is enabled
         from shelfmark.core.utils import transform_cover_url
@@ -3090,6 +3098,7 @@ def api_releases() -> Response | tuple[Response, int]:
 
         # Convert book to dict and transform cover_url
         book_dict = asdict(book)
+        annotate_books_with_grimmory_status([book_dict], user_id=get_session_db_user_id(session))
         from shelfmark.core.utils import transform_cover_url
 
         if book_dict.get("cover_url"):

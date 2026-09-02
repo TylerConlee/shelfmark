@@ -58,6 +58,7 @@ export const BookGetButton = ({
   const isCompleted = buttonState?.state === 'complete';
   const hasError = buttonState?.state === 'error';
   const isBlocked = buttonState?.state === 'blocked';
+  const isAlreadyInLibrary = book.in_library === true;
   const isInProgress =
     buttonState && ['queued', 'resolving', 'locating', 'downloading'].includes(buttonState.state);
   const showCircularProgress =
@@ -65,7 +66,7 @@ export const BookGetButton = ({
   const showSpinner = (isInProgress && !showCircularProgress) || isLoading;
 
   // Disable button while loading metadata
-  const isDisabled = isLoading || isBlocked;
+  const isDisabled = isLoading || isBlocked || isAlreadyInLibrary;
 
   // Determine button styling based on state
   const getButtonClasses = () => {
@@ -79,6 +80,11 @@ export const BookGetButton = ({
       return isIconVariant
         ? 'text-gray-400 dark:text-gray-500 cursor-not-allowed opacity-70'
         : 'bg-gray-500 opacity-75 cursor-not-allowed';
+    }
+    if (isAlreadyInLibrary) {
+      return isIconVariant
+        ? 'text-emerald-600 dark:text-emerald-400 cursor-not-allowed'
+        : 'bg-emerald-700 opacity-80 cursor-not-allowed';
     }
     if (isLoading) {
       // Show loading state (fetching metadata)
@@ -101,6 +107,7 @@ export const BookGetButton = ({
 
   // Determine display text
   const getDisplayText = () => {
+    if (isAlreadyInLibrary) return 'Already in library';
     if (isBlocked) return buttonState?.text || 'Unavailable';
     if (isCompleted) return 'Downloaded';
     if (hasError) return 'Failed';
@@ -115,6 +122,13 @@ export const BookGetButton = ({
 
   // Render appropriate icon based on state
   const renderIcon = () => {
+    if (isAlreadyInLibrary) {
+      return (
+        <svg className={iconSize} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+        </svg>
+      );
+    }
     if (isCompleted) {
       return (
         <svg className={iconSize} fill="none" stroke="currentColor" viewBox="0 0 24 24">
