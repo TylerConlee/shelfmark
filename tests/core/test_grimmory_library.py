@@ -65,3 +65,35 @@ def test_lookup_failure_fails_open(monkeypatch):
     monkeypatch.setattr(grimmory_library, "_load_index", fail)
 
     assert grimmory_library.find_grimmory_match(title="Dune", authors=["Frank Herbert"]) is None
+
+
+def test_load_index_does_not_require_upload_library_ids(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        grimmory_library,
+        "_effective_booklore_settings",
+        lambda _user_id: {
+            "BOOKLORE_HOST": "http://booklore:6060",
+            "BOOKLORE_USERNAME": "reader",
+            "BOOKLORE_PASSWORD": "secret",
+            "BOOKLORE_LIBRARY_ID": None,
+            "BOOKLORE_PATH_ID": None,
+        },
+    )
+
+    monkeypatch.setattr(
+        "shelfmark.download.outputs.booklore.booklore_login", lambda _config: "token"
+    )
+
+    def fake_list(config, _token):
+        captured["upload_to_bookdrop"] = config.upload_to_bookdrop
+        return []
+
+    monkeypatch.setattr("shelfmark.download.outputs.booklore.booklore_list_books", fake_list)
+    grimmory_library.invalidate_grimmory_library_cache()
+
+    index = grimmory_library._load_index(user_id=7)
+
+    assert index.books == ()
+    assert captured["upload_to_bookdrop"] is True

@@ -130,7 +130,12 @@ def _load_index(user_id: int | None) -> GrimmoryLibraryIndex:
         build_booklore_config,
     )
 
-    booklore_config = build_booklore_config(_effective_booklore_settings(user_id), user_id=user_id)
+    # Listing the library only needs connection credentials. Force the
+    # bookdrop destination so the shared upload-config builder does not require
+    # library/path IDs that are irrelevant to GET /api/v1/books.
+    settings = _effective_booklore_settings(user_id)
+    settings["BOOKLORE_DESTINATION"] = "bookdrop"
+    booklore_config = build_booklore_config(settings, user_id=user_id)
     cache_key = (booklore_config.base_url, booklore_config.username, user_id)
     now = time.monotonic()
     with _cache_lock:
