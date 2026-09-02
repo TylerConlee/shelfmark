@@ -55,10 +55,7 @@ def test_matches_normalized_title_and_author(monkeypatch):
 def test_does_not_match_title_without_same_author(monkeypatch):
     monkeypatch.setattr(grimmory_library, "_load_index", lambda _user_id: _index())
 
-    assert (
-        grimmory_library.find_grimmory_match(title="Dune", authors=["Brian Herbert"])
-        is None
-    )
+    assert grimmory_library.find_grimmory_match(title="Dune", authors=["Brian Herbert"]) is None
 
 
 def test_lookup_failure_fails_open(monkeypatch):

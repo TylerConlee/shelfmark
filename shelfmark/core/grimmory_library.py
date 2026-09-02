@@ -51,9 +51,7 @@ class GrimmoryLibraryIndex:
 def _normalize_text(value: object) -> str:
     normalized = unicodedata.normalize("NFKD", str(value or "")).casefold()
     without_marks = "".join(char for char in normalized if not unicodedata.combining(char))
-    return " ".join(
-        "".join(char if char.isalnum() else " " for char in without_marks).split()
-    )
+    return " ".join("".join(char if char.isalnum() else " " for char in without_marks).split())
 
 
 def _normalize_isbn(value: object) -> str:
@@ -88,9 +86,7 @@ def _build_index(records: list[dict[str, Any]]) -> GrimmoryLibraryIndex:
         raw_authors = metadata.get("authors") or record.get("authors") or []
         if isinstance(raw_authors, str):
             raw_authors = [raw_authors]
-        author_keys = frozenset(
-            key for author in raw_authors if (key := _author_key(author))
-        )
+        author_keys = frozenset(key for author in raw_authors if (key := _author_key(author)))
         isbns = frozenset(
             isbn
             for field in ("isbn13", "isbn10", "isbn_13", "isbn_10", "isbn")

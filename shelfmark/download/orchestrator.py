@@ -254,7 +254,9 @@ def queue_release(
         identity_authors = (
             [str(value) for value in raw_authors]
             if isinstance(raw_authors, list)
-            else [str(author)] if author else []
+            else [str(author)]
+            if author
+            else []
         )
         library_match = find_grimmory_match(
             title=str(release_data.get("title") or ""),
