@@ -17,7 +17,7 @@ logger = setup_logger(__name__)
 ALREADY_IN_LIBRARY_ERROR = "Already in Grimmory library"
 _CACHE_TTL_SECONDS = 300
 _cache_lock = threading.Lock()
-_cache: dict[tuple[str, str, int | None], tuple[float, "GrimmoryLibraryIndex"]] = {}
+_cache: dict[tuple[str, str, int | None], tuple[float, GrimmoryLibraryIndex]] = {}
 _BRACKETED = re.compile(r"\s*\[[^\]]*\]\s*$")
 
 
