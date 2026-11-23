@@ -1,5 +1,7 @@
 """Tests for self-service notification test endpoint."""
 
+from __future__ import annotations
+
 import os
 import tempfile
 from unittest.mock import patch

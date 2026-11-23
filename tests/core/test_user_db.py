@@ -4,6 +4,8 @@ Tests for SQLite user database.
 Tests CRUD operations on users and user_settings tables.
 """
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import tempfile
@@ -611,6 +613,71 @@ class TestUserCRUD:
         assert "charlie" in usernames
 
 
+class TestCachedUserLookup:
+    """Tests for the short-lived lookup cache used by per-request auth."""
+
+    @pytest.fixture
+    def counted(self, user_db, monkeypatch):
+        calls = []
+        real_get_user = user_db.get_user
+
+        def counting_get_user(**kwargs):
+            calls.append(kwargs)
+            return real_get_user(**kwargs)
+
+        monkeypatch.setattr(user_db, "get_user", counting_get_user)
+        return calls
+
+    def test_repeat_lookups_are_answered_from_memory(self, user_db, counted):
+        user = user_db.create_user(username="john", role="admin")
+
+        for _ in range(3):
+            assert user_db.get_user_cached(username="john")["id"] == user["id"]
+            assert user_db.get_user_cached(user_id=user["id"])["username"] == "john"
+        assert user_db.get_user_cached(username="nobody") is None
+        assert user_db.get_user_cached(username="nobody") is None
+
+        assert len(counted) == 3
+
+    def test_entries_expire_after_the_ttl(self, user_db, counted, monkeypatch):
+        import shelfmark.core.user_db as user_db_module
+
+        user_db.create_user(username="john")
+        now = [1000.0]
+        monkeypatch.setattr(user_db_module.time, "monotonic", lambda: now[0])
+
+        user_db.get_user_cached(username="john")
+        now[0] += user_db_module.USER_CACHE_TTL_SECONDS - 0.1
+        user_db.get_user_cached(username="john")
+        assert len(counted) == 1
+
+        now[0] += 0.2
+        user_db.get_user_cached(username="john")
+        assert len(counted) == 2
+
+    def test_writes_through_the_db_drop_cached_entries(self, user_db):
+        user = user_db.create_user(username="john", role="admin")
+        assert user_db.get_user_cached(username="john")["role"] == "admin"
+        assert user_db.get_user_cached(username="jane") is None
+
+        user_db.update_user(user["id"], role="user")
+        assert user_db.get_user_cached(username="john")["role"] == "user"
+
+        user_db.create_user(username="jane")
+        assert user_db.get_user_cached(username="jane") is not None
+
+        user_db.delete_user(user["id"])
+        assert user_db.get_user_cached(username="john") is None
+        assert user_db.get_user_cached(user_id=user["id"]) is None
+
+    def test_callers_cannot_change_the_cached_row(self, user_db):
+        user_db.create_user(username="john", role="user")
+
+        user_db.get_user_cached(username="john")["role"] = "admin"
+
+        assert user_db.get_user_cached(username="john")["role"] == "user"
+
+
 class TestUserSettings:
     """Tests for per-user settings."""
 
@@ -962,6 +1029,29 @@ class TestDownloadRequests:
         assert reopened is not None
         assert reopened["status"] == "pending"
         assert reopened["last_failure_reason"] is None
+
+    def test_reopen_failed_request_writes_the_admin_note_and_keeps_it_when_not_given(self, user_db):
+        user = user_db.create_user(username="alice")
+        created = user_db.create_request(
+            user_id=user["id"],
+            content_type="ebook",
+            request_level="release",
+            policy_mode="request_release",
+            book_data=self._book_data(),
+            release_data=self._release_data(),
+            status="fulfilled",
+            delivery_state="error",
+            admin_note="Approved from browse mode",
+        )
+
+        kept = user_db.reopen_failed_request(created["id"])
+        assert kept is not None
+        assert kept["admin_note"] == "Approved from browse mode"
+
+        user_db.update_request(created["id"], status="fulfilled", delivery_state="error")
+        noted = user_db.reopen_failed_request(created["id"], admin_note="  Try again  ")
+        assert noted is not None
+        assert noted["admin_note"] == "Try again"
 
     def test_count_pending_requests(self, user_db):
         alice = user_db.create_user(username="alice")

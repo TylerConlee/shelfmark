@@ -4,6 +4,8 @@ An empty or misnamed channel sends nothing at all, so a timeout that is only
 checked when a message arrives never fires and the search hangs forever.
 """
 
+from __future__ import annotations
+
 import time
 
 import pytest

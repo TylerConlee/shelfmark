@@ -1,5 +1,7 @@
 """Archive extraction utilities for downloaded book archives."""
 
+from __future__ import annotations
+
 import shutil
 import tempfile
 import zipfile

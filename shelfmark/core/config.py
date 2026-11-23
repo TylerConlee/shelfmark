@@ -1,5 +1,7 @@
 """Configuration singleton with ENV > config file > default resolution."""
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import time
@@ -124,9 +126,10 @@ class Config:
         self._field_map.clear()
         self._cache.clear()
 
-        for key, (field, tab_name) in registry.get_settings_field_map().items():
-            self._field_map[key] = (field, tab_name)
-            self._cache[key] = registry.get_setting_value(field, tab_name)
+        with registry.config_files_read_once():
+            for key, (field, tab_name) in registry.get_settings_field_map().items():
+                self._field_map[key] = (field, tab_name)
+                self._cache[key] = registry.get_setting_value(field, tab_name)
 
         self._loaded = True
 
@@ -167,7 +170,7 @@ class Config:
             db_path = str(Path(os.environ.get("CONFIG_DIR", "/config")) / "users.db")
             user_db = user_db_cls(db_path)
             user_db.initialize()
-        except ImportError, OSError, sqlite3.Error:
+        except (ImportError, OSError, sqlite3.Error):
             # Multi-user support is optional; fall back to global config when unavailable.
             return None
         else:
@@ -186,7 +189,7 @@ class Config:
 
         try:
             settings = user_db.get_user_settings(user_id)
-        except sqlite3.OperationalError, OSError, ValueError, TypeError:
+        except (sqlite3.OperationalError, OSError, ValueError, TypeError):
             return {}
 
         if not isinstance(settings, dict):
@@ -213,6 +216,16 @@ class Config:
             The setting value, or default if not found
 
         """
+        return self.get_for_user(key, default, user_id=user_id)[0]
+
+    def get_for_user(
+        self, key: str, default: object = None, user_id: int | None = None
+    ) -> tuple[object, bool]:
+        """Like ``get``, plus whether the value is the user's own override.
+
+        Both come from a single read, so a settings save in between cannot make them
+        disagree. False means the deployment-wide value set by an admin or ENV.
+        """
         self._ensure_loaded()
 
         if key in self._field_map:
@@ -221,15 +234,15 @@ class Config:
 
             # Deployment-level ENV values always win.
             if field.env_supported and registry.is_value_from_env(field):
-                return self._cache.get(key, default)
+                return self._cache.get(key, default), False
 
             # User overrides are only available for explicitly overridable fields.
             if user_id is not None and getattr(field, "user_overridable", False):
                 user_value = self._get_user_override(user_id, key)
                 if user_value is not None:
-                    return user_value
+                    return user_value, True
 
-        return self._cache.get(key, default)
+        return self._cache.get(key, default), False
 
     def __getattr__(self, name: str) -> object:
         """Allow attribute-style access to settings.

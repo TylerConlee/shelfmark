@@ -6,6 +6,8 @@ module scope, which is exactly the dependency an external-bypasser deployment is
 entitled not to have installed.
 """
 
+from __future__ import annotations
+
 import threading
 import time
 from collections.abc import Mapping
@@ -37,6 +39,10 @@ DDG_COOKIE_NAMES = {
     "__ddgmark_",
     "ddg_last_challenge",
 }
+
+# Anna's Archive's own pass for its ?check=1 hop. Without it the hop 302s back
+# forever, however good the __ddg* clearance is.
+AA_COOKIE_NAMES = {"aa_ddg_check"}
 
 # DDoS-Guard cookies that describe *one* check rather than granting clearance, and so
 # must never be replayed on a later request. Observed live on Anna's Archive:
@@ -71,17 +77,25 @@ def _get_full_cookie_domains() -> set[str]:
     return {_get_base_domain(domain) for domain in get_zlib_cookie_domains()}
 
 
+def _replay_per_check_cookies() -> bool:
+    """Whether the per-check trio is kept rather than dropped (see env.py)."""
+    from shelfmark.config import env
+
+    return env.DDG_REPLAY_PER_CHECK_COOKIES
+
+
 def _should_extract_cookie(name: str, *, extract_all: bool) -> bool:
     """Determine if a cookie should be extracted based on its name."""
     # Checked before extract_all: a per-check token is wrong to replay for every
     # domain, including the full-session ones.
-    if name in DDG_EPHEMERAL_COOKIE_NAMES:
+    if name in DDG_EPHEMERAL_COOKIE_NAMES and not _replay_per_check_cookies():
         return False
     if extract_all:
         return True
     is_cf = name in CF_COOKIE_NAMES or name.startswith("cf_")
     is_ddg = name in DDG_COOKIE_NAMES or name.startswith("__ddg")
-    return is_cf or is_ddg
+    is_aa = name in AA_COOKIE_NAMES
+    return is_cf or is_ddg or is_aa
 
 
 def _cookie_field(cookie: Any, name: str) -> Any:
@@ -114,7 +128,7 @@ def _cookie_expiry(cookie: Any) -> float | None:
             continue
         try:
             expiry = float(raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             logger.debug("Unreadable cookie expiry %r; treating as a session cookie", raw)
             return None
         # <= 0 is how both shapes spell "session cookie", not "expired in 1970".
@@ -138,9 +152,11 @@ def store_extracted_cookies(
     extract_all = base_domain in _get_full_cookie_domains()
 
     cookies_found: dict[str, dict[str, Any]] = {}
+    dropped: list[str] = []
     for cookie in cookies:
         name = _cookie_field(cookie, "name") or ""
         if not _should_extract_cookie(name, extract_all=extract_all):
+            dropped.append(name)
             continue
         secure = _cookie_field(cookie, "secure")
         cookies_found[name] = {
@@ -151,6 +167,18 @@ def store_extracted_cookies(
             "secure": True if secure is None else bool(secure),
             "httpOnly": True,
         }
+
+    # Names only, never values. Which cookies a solve won, and which of them were held
+    # back, is the evidence needed to settle what DDoS-Guard actually treats as clearance
+    # (issue #1276) - and without it a debug log shows a solve succeeding and the next
+    # request being challenged with nothing in between to explain why.
+    logger.debug(
+        "Solve on %s won %s; keeping %s; dropping %s",
+        base_domain,
+        sorted({_cookie_field(c, "name") or "" for c in cookies}),
+        sorted(cookies_found),
+        sorted(set(dropped)) or "nothing",
+    )
 
     if not cookies_found:
         return

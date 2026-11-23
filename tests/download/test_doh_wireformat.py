@@ -5,6 +5,8 @@ these providers only work through wireformat. Quad9 additionally requires HTTP/2
 (section 5.2) and answers HTTP/1.1 with 505.
 """
 
+from __future__ import annotations
+
 import base64
 import struct
 

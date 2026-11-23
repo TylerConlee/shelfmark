@@ -1,5 +1,7 @@
 """Utility functions for AudiobookBay integration."""
 
+from __future__ import annotations
+
 import re
 
 # WordPress texturizes punctuation on output only: a post stored as "The

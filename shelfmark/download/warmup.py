@@ -32,6 +32,19 @@ _DEFAULT_QUERY = "The Great Gatsby"
 _warmup_thread: threading.Thread | None = None
 _warmup_lock = threading.Lock()
 
+# Set as soon as a real release search starts. The warm-up exists to pay the cold path
+# *before* the user does; once they have beaten it to the box there is nothing left to
+# pre-solve, and running anyway is actively harmful - the bypasser serializes on one
+# browser, so the warm-up's solve goes in front of the search the user is watching. In
+# the bundle on issue #1276 that cost a full minute of a 2m27s wait, on a container 16
+# seconds old, for a throwaway "The Great Gatsby" query nobody asked for.
+_user_search_seen = threading.Event()
+
+
+def note_user_search() -> None:
+    """Record that a real search has run, so a pending warm-up stands down."""
+    _user_search_seen.set()
+
 
 def _as_bool(value: object, *, default: bool) -> bool:
     """Coerce a config value that may arrive as a string, bool or None."""
@@ -85,6 +98,12 @@ def run_warmup() -> bool:
     """
     from shelfmark.core.mirrors import has_aa_mirror_configuration
 
+    # Checked here rather than only at schedule time: the delay is what this races with,
+    # so the user's first search usually lands *during* the wait, not before it.
+    if _user_search_seen.is_set():
+        logger.info("Search warm-up skipped: a real search got there first")
+        return False
+
     if not has_aa_mirror_configuration():
         logger.debug("Search warm-up skipped: no Anna's Archive mirrors configured")
         return False
@@ -95,7 +114,7 @@ def run_warmup() -> bool:
         from shelfmark.core.models import SearchFilters
         from shelfmark.release_sources.direct_download import search_books
 
-        results = search_books(query, SearchFilters())
+        results, _ = search_books(query, SearchFilters())
     except Exception:
         # Broad by design: a warm-up must never take the app down, and the source
         # raises everything from network errors to parse failures.

@@ -1,5 +1,7 @@
 """Tests for local CSV list ingestion and browsing."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import pytest

@@ -16,6 +16,7 @@ from shelfmark.core.request_helpers import (
     normalize_optional_text,
     now_utc_iso,
 )
+from shelfmark.core.utils import DB_BUSY_TIMEOUT_SECONDS, transform_cover_url
 
 logger = setup_logger(__name__)
 
@@ -99,7 +100,7 @@ class DownloadHistoryService:
         self._lock = threading.Lock()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
@@ -203,15 +204,22 @@ class DownloadHistoryService:
             "author": row.get("author"),
             "format": row.get("format"),
             "size": row.get("size"),
-            "preview": row.get("preview"),
+            "preview": transform_cover_url(row.get("preview"), str(row.get("task_id") or "")),
             "content_type": row.get("content_type"),
             "source": row.get("source"),
             "source_display_name": row.get("source_display_name"),
+            "downloads": row.get("downloads"),
             "status_message": row.get("status_message"),
             "download_path": DownloadHistoryService._resolve_existing_download_path(
                 row.get("download_path")
             ),
             "added_time": DownloadHistoryService._iso_to_epoch(row.get("queued_at")),
+            # When it ended (epoch seconds, like added_time); None while it is still active.
+            "finished_at": (
+                None
+                if row.get("final_status") == "active"
+                else DownloadHistoryService._iso_to_epoch(row.get("terminal_at"))
+            ),
             "user_id": row.get("user_id"),
             "username": row.get("username"),
             "request_id": row.get("request_id"),
@@ -272,6 +280,7 @@ class DownloadHistoryService:
         size: str | None,
         preview: str | None,
         content_type: str | None,
+        downloads: int | None,
         origin: str,
         retry_payload: dict[str, Any] | None = None,
     ) -> None:
@@ -280,6 +289,11 @@ class DownloadHistoryService:
         On first queue: inserts a new row.
         On retry (row already exists): resets the row back to 'active'
         so the normal finalize path works when the retry completes.
+
+        A task id comes from the release, so a second request that chooses the same release
+        reuses the row. It then takes the row over: the request, requester and what the card
+        shows follow the new download, instead of the new download appearing under the
+        request that first used the release (with that request's notes and state).
         """
         normalized_task_id = _normalize_task_id(task_id)
         normalized_user_id = normalize_optional_positive_int(user_id, "user_id")
@@ -307,15 +321,27 @@ class DownloadHistoryService:
                     title, author, format, size, preview, content_type,
                     origin, final_status,
                     status_message, download_path, retry_payload,
-                    queued_at, terminal_at
+                    queued_at, terminal_at, downloads
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, ?, ?, ?, ?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     final_status = 'active',
                     status_message = NULL,
                     download_path = NULL,
                     retry_payload = excluded.retry_payload,
-                    terminal_at = ?
+                    terminal_at = ?,
+                    downloads = excluded.downloads,
+                    request_id = COALESCE(excluded.request_id, request_id),
+                    user_id = COALESCE(excluded.user_id, user_id),
+                    username = COALESCE(excluded.username, username),
+                    title = excluded.title,
+                    author = excluded.author,
+                    format = excluded.format,
+                    size = excluded.size,
+                    preview = excluded.preview,
+                    content_type = excluded.content_type,
+                    origin = excluded.origin,
+                    queued_at = excluded.queued_at
                 """,
                     (
                         normalized_task_id,
@@ -334,6 +360,7 @@ class DownloadHistoryService:
                         normalized_retry_payload,
                         recorded_at,
                         recorded_at,
+                        downloads,
                         recorded_at,
                     ),
                 )
@@ -420,6 +447,46 @@ class DownloadHistoryService:
                 if normalized is not None:
                     result.append(normalized)
             return result
+        finally:
+            conn.close()
+
+    def list_completed_request_ids(self) -> set[int]:
+        """Return the id of every request that has a download that finished."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT request_id FROM download_history "
+                "WHERE request_id IS NOT NULL AND final_status = 'complete'"
+            ).fetchall()
+            return {int(row["request_id"]) for row in rows}
+        finally:
+            conn.close()
+
+    def list_request_ids(self) -> set[int]:
+        """Return the id of every request that has at least one download row."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT request_id FROM download_history WHERE request_id IS NOT NULL"
+            ).fetchall()
+            return {int(row["request_id"]) for row in rows}
+        finally:
+            conn.close()
+
+    def list_request_task_ids(self, *, user_id: int) -> list[str]:
+        """Return the task ids of every request-linked download owned by ``user_id``.
+
+        A non-admin addresses these downloads by an opaque id, so routes resolve it
+        against this set, which also confines the lookup to the user's own downloads.
+        """
+        normalized_user_id = normalize_optional_positive_int(user_id, "user_id")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT task_id FROM download_history WHERE user_id = ? AND request_id IS NOT NULL",
+                (normalized_user_id,),
+            ).fetchall()
+            return [str(row["task_id"]) for row in rows]
         finally:
             conn.close()
 

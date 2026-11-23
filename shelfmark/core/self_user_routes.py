@@ -1,13 +1,15 @@
 """Self-service user account routes."""
 
+from __future__ import annotations
+
 import sqlite3
+from dataclasses import dataclass
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from flask import Flask, Response, g, jsonify, request, session
-from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
-from shelfmark.config.env import CWA_DB_PATH
 from shelfmark.core.admin_settings_routes import (
     build_user_notification_test_response,
     validate_user_settings,
@@ -38,6 +40,20 @@ if TYPE_CHECKING:
 logger = setup_logger(__name__)
 
 MIN_PASSWORD_LENGTH = 4
+
+
+@dataclass(frozen=True)
+class PasswordAttemptLimiter:
+    """The login lockout, lent to the password change so it cannot be used to guess a password.
+
+    ``record_failure`` returns True when the account is now locked.
+    """
+
+    is_locked: Callable[[str], bool]
+    record_failure: Callable[[str], bool]
+    clear: Callable[[str], None]
+
+
 _VISIBLE_SELF_SETTINGS_SECTIONS_KEY = "VISIBLE_SELF_SETTINGS_SECTIONS"
 _SELF_SETTINGS_SECTION_DELIVERY = "delivery"
 _SELF_SETTINGS_SECTION_SEARCH = "search"
@@ -60,7 +76,7 @@ def _get_current_user(
         return None, None, (jsonify({"error": "Invalid user context"}), 400)
     try:
         user_id = int(raw_user_id)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None, None, (jsonify({"error": "Invalid user context"}), 400)
 
     user = user_db.get_user(user_id=user_id)
@@ -96,6 +112,19 @@ def _serialize_self_user(user: Mapping[str, Any], auth_mode: str) -> dict[str, A
     return payload
 
 
+def _admin_default_routes_set() -> bool:
+    """Whether the admin has set a default notification route with a URL.
+
+    The routes themselves stay hidden from a self-service user because their URLs can carry
+    tokens or credentials. The fact that a default exists is what the settings page needs to say
+    that it applies to them.
+    """
+    routes = app_config.get("USER_NOTIFICATION_ROUTES", [])
+    if not isinstance(routes, list):
+        return False
+    return any(isinstance(row, dict) and str(row.get("url") or "").strip() for row in routes)
+
+
 def _build_optional_user_preferences(
     user_db: UserDB,
     *,
@@ -105,7 +134,11 @@ def _build_optional_user_preferences(
     preference_label: str,
 ) -> tuple[dict[str, Any] | None, tuple[Response, int] | None]:
     try:
-        return _build_user_preferences_payload(user_db, user_id, tab_name), None
+        # Self-service: the user only gets to see values they set themselves.
+        return (
+            _build_user_preferences_payload(user_db, user_id, tab_name, for_self_service=True),
+            None,
+        )
     except ValueError as exc:
         if str(exc) == missing_tab_error:
             return None, (jsonify({"error": missing_tab_error}), 500)
@@ -178,7 +211,49 @@ def _get_allowed_self_settings_keys(visible_sections: list[str]) -> set[str]:
     return allowed_keys
 
 
-def register_self_user_routes(app: Flask, user_db: UserDB) -> None:
+def _check_current_password(
+    user: Mapping[str, Any],
+    current_password: object,
+    attempts: PasswordAttemptLimiter | None,
+) -> tuple[Response, int] | None:
+    """An error response unless ``current_password`` is the user's password.
+
+    A wrong guess counts toward the same lockout as a failed login.
+    """
+    username = str(user.get("username") or "")
+    if attempts is not None and attempts.is_locked(username):
+        return jsonify(
+            {
+                "error": "Too many failed attempts",
+                "message": "This account is locked for a while after too many wrong passwords.",
+            }
+        ), 429
+    stored_hash = user.get("password_hash")
+    if (
+        not isinstance(current_password, str)
+        or not current_password
+        or not isinstance(stored_hash, str)
+        or not check_password_hash(stored_hash, current_password)
+    ):
+        if attempts is not None:
+            attempts.record_failure(username)
+        return jsonify(
+            {
+                "error": "Current password is incorrect",
+                "message": "Enter your current password to set a new one.",
+            }
+        ), 400
+    if attempts is not None:
+        attempts.clear(username)
+    return None
+
+
+def register_self_user_routes(
+    app: Flask,
+    user_db: UserDB,
+    *,
+    password_attempts: PasswordAttemptLimiter | None = None,
+) -> None:
     """Register self-service user endpoints."""
 
     def _require_authenticated_user(
@@ -191,7 +266,7 @@ def register_self_user_routes(app: Flask, user_db: UserDB) -> None:
 
         @wraps(f)
         def decorated(*args: object, **kwargs: object) -> Response | tuple[Response, int]:
-            auth_mode = load_active_auth_mode(CWA_DB_PATH, user_db=user_db)
+            auth_mode = load_active_auth_mode()
             g.auth_mode = auth_mode
             if auth_mode != "none" and "user_id" not in session:
                 return jsonify({"error": "Authentication required"}), 401
@@ -251,6 +326,8 @@ def register_self_user_routes(app: Flask, user_db: UserDB) -> None:
             )
             if error_response:
                 return error_response
+            if notification_preferences is not None:
+                notification_preferences["adminDefaultRoutesSet"] = _admin_default_routes_set()
 
         user_overridable_keys = sorted(
             set(delivery_preferences.get("keys", []) if delivery_preferences else [])
@@ -302,7 +379,10 @@ def register_self_user_routes(app: Flask, user_db: UserDB) -> None:
         auth_source = capabilities["authSource"]
 
         password = data.get("password", "")
+        password_hash: str | None = None
         if password:
+            if not isinstance(password, str):
+                return jsonify({"error": "Password must be a string"}), 400
             if not capabilities["canSetPassword"]:
                 return jsonify(
                     {
@@ -314,7 +394,12 @@ def register_self_user_routes(app: Flask, user_db: UserDB) -> None:
                 return jsonify(
                     {"error": f"Password must be at least {MIN_PASSWORD_LENGTH} characters"}
                 ), 400
-            user_db.update_user(user_id, password_hash=generate_password_hash(password))
+            current_error = _check_current_password(
+                user, data.get("current_password"), password_attempts
+            )
+            if current_error is not None:
+                return current_error
+            password_hash = generate_password_hash(password)
 
         user_fields: dict[str, Any] = {}
         if "email" in data:
@@ -363,9 +448,7 @@ def register_self_user_routes(app: Flask, user_db: UserDB) -> None:
             if field in user_fields and user_fields[field] == user.get(field):
                 user_fields.pop(field)
 
-        if user_fields:
-            user_db.update_user(user_id, **user_fields)
-
+        validated_settings: dict[str, Any] | None = None
         if "settings" in data:
             settings_payload = data["settings"]
             if not isinstance(settings_payload, dict):
@@ -388,15 +471,26 @@ def register_self_user_routes(app: Flask, user_db: UserDB) -> None:
                     }
                 ), 400
 
-            validated_settings, validation_errors = validate_user_settings(settings_payload)
+            validated_settings, validation_errors = validate_user_settings(
+                settings_payload, self_service_user=user
+            )
             if validation_errors:
                 return jsonify(
                     {
                         "error": "Invalid settings payload",
+                        "message": "; ".join(validation_errors),
                         "details": validation_errors,
                     }
                 ), 400
 
+        # Apply the writes only once the whole payload has been accepted.
+        if password_hash is not None:
+            user_fields["password_hash"] = password_hash
+
+        if user_fields:
+            user_db.update_user(user_id, **user_fields)
+
+        if validated_settings is not None:
             user_db.set_user_settings(user_id, validated_settings)
             try:
                 app_config.refresh(force=True)

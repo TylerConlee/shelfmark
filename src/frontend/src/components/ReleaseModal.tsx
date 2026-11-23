@@ -7,6 +7,7 @@ import { useReleaseSearchSession } from '../hooks/releaseModal/useReleaseSearchS
 import { useTabIndicator } from '../hooks/ui/useTabIndicator';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { useEscapeKey } from '../hooks/useEscapeKey';
+import { inspectRelease } from '../services/api';
 import type {
   Book,
   Release,
@@ -18,10 +19,15 @@ import type {
   LeadingCellConfig,
   ContentType,
   RequestPolicyMode,
+  PackBook,
+  InspectReleaseResponse,
+  PackPlan,
 } from '../types';
 import { isMetadataBook } from '../types';
 import { bookSupportsTargets } from '../utils/bookTargetLoader';
 import { getColorStyleFromHint } from '../utils/colorMaps';
+import { failedDownloadButtonState } from '../utils/failedDownloadButton';
+import { groupFilesByFormat, type FormatGroup } from '../utils/formatReview';
 import {
   LANGUAGE_OPTION_DEFAULT,
   getLanguageFilterValues,
@@ -29,7 +35,10 @@ import {
   buildLanguageNormalizer,
 } from '../utils/languageFilters';
 import { getNestedValue, toComparableText, toStringValue } from '../utils/objectHelpers';
+import { toBookPlanPayload } from '../utils/packReview';
 import { getReleaseFormats } from '../utils/releaseFormats';
+import { INITIAL_ENTER_ANIMATION, nextEnterAnimation } from '../utils/releaseModalEnterAnimation';
+import { buildReleaseDownloadPayload, type ReleaseDownloadOptions } from '../utils/releasePayload';
 import {
   getBookTitleCandidates,
   getBookAuthorCandidates,
@@ -49,7 +58,9 @@ import { BookDownloadButton } from './BookDownloadButton';
 import { BookTargetDropdown } from './BookTargetDropdown';
 import { Dropdown } from './Dropdown';
 import { DropdownList } from './DropdownList';
+import { FormatReviewPanel } from './FormatReviewPanel';
 import { LanguageMultiSelect } from './LanguageMultiSelect';
+import { PackReviewPanel } from './PackReviewPanel';
 import { ReleaseCell } from './ReleaseCell';
 
 // Combined mode configuration for the ReleaseModal
@@ -140,7 +151,12 @@ const DEFAULT_COLUMN_CONFIG: ReleaseColumnConfig = {
 interface ReleaseModalProps {
   book: Book | null;
   onClose: () => void;
-  onDownload: (book: Book, release: Release, contentType: ContentType) => Promise<void>;
+  onDownload: (
+    book: Book,
+    release: Release,
+    contentType: ContentType,
+    options?: ReleaseDownloadOptions,
+  ) => Promise<void>;
   onRequestRelease?: (book: Book, release: Release, contentType: ContentType) => Promise<void>;
   onRequestBook?: (book: Book, contentType: ContentType) => Promise<void>;
   getPolicyModeForSource?: (source: string, contentType: ContentType) => RequestPolicyMode;
@@ -540,7 +556,7 @@ const ReleaseRow = ({
           </p>
           {/* Plugin-provided info line (format, size, indexer, seeders, etc.) */}
           {mobileColumns.length > 0 && (
-            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+            <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">
               {(() => {
                 // Pre-filter columns that will render content to avoid orphan dots
                 const columnsWithContent = mobileColumns.filter((col) => {
@@ -565,6 +581,11 @@ const ReleaseRow = ({
                     if (!value || value === col.fallback) {
                       return Boolean(col.fallback);
                     }
+                  }
+
+                  if (col.render_type === 'text' || col.render_type === 'number') {
+                    // Optional detail columns (series, narrator, bitrate) are often blank
+                    return value.trim() !== '';
                   }
 
                   return true;
@@ -762,6 +783,22 @@ const ReleaseModalSession = ({
       : supportedFormats;
   const [isRequestingBook, setIsRequestingBook] = useState(false);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
+  // Multi-book packs: `multiBook` is the manual header toggle (heuristic split for
+  // releases we can't inspect); `packReview` holds an inspected pack awaiting approval.
+  const [multiBook, setMultiBook] = useState(false);
+  const [packReview, setPackReview] = useState<{
+    release: Release;
+    plan: PackPlan;
+    books: PackBook[];
+  } | null>(null);
+  const [packSubmitting, setPackSubmitting] = useState(false);
+  // Format picker: `chooseFormats` is the header toggle; `formatReview` holds an inspected
+  // release with several formats awaiting the user's selection.
+  const [chooseFormats, setChooseFormats] = useState(false);
+  const [formatReview, setFormatReview] = useState<{
+    release: Release;
+    groups: FormatGroup[];
+  } | null>(null);
   const isCombinedMode = combinedMode != null;
   const combinedPhase = combinedMode?.phase ?? null;
   const combinedStepLabel = combinedMode?.stepLabel ?? '';
@@ -869,10 +906,27 @@ const ReleaseModalSession = ({
     } finally {
       setIsRequestingBook(false);
     }
+    // Kept against the advisory: the body really does read both. `handleClose` is aliased
+    // from the `onClose` prop, which is why the compiler names the source instead, and
+    // dropping `contentType` would let this close over a stale one and request the wrong
+    // format. Correctness first; the cost is an extra callback identity.
+    // oxlint-disable-next-line react/memo-dependencies
   }, [book, onRequestBook, isRequestingBook, contentType, handleClose]);
 
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const tabIndicatorStyle = useTabIndicator(tabRefs, activeTab, allTabs);
+  const tabStripRef = useRef<HTMLDivElement>(null);
+
+  // The strip's scrollbar is hidden, so bring the selected tab fully into view. This sets
+  // the strip's own scrollLeft: scrollIntoView would also scroll the modal vertically.
+  const selectTab = (name: string, tab: HTMLButtonElement) => {
+    setActiveTab(name);
+    const strip = tabStripRef.current;
+    strip?.scrollTo({
+      left: tab.offsetLeft - (strip.clientWidth - tab.offsetWidth) / 2,
+      behavior: 'smooth',
+    });
+  };
 
   // Get unique formats from current releases for filter dropdown
   // Only show formats that are in the supported list
@@ -1115,7 +1169,9 @@ const ReleaseModalSession = ({
     const narratorField = book.display_fields.find((f) => f.icon === 'microphone');
 
     return { starField, ratingsField, usersField, pagesField, lengthField, narratorField };
-  }, [book?.display_fields]);
+    // `book`, not `book?.display_fields`: the body reads `book.display_fields`
+    // unguarded after the early return, which is the dependency the compiler infers.
+  }, [book]);
 
   const getReleaseActionMode = useCallback(
     (release: Release): RequestPolicyMode => {
@@ -1140,9 +1196,7 @@ const ReleaseModalSession = ({
         if (mode === 'blocked' || mode === 'request_book') {
           return { text: 'Unavailable', state: 'blocked' };
         }
-        return currentStatus.error[releaseId].retry_available === true
-          ? { text: 'Retry', state: 'download' }
-          : { text: 'Failed', state: 'error' };
+        return failedDownloadButtonState(currentStatus.error[releaseId]);
       }
       // Check completed
       if (currentStatus.complete && currentStatus.complete[releaseId]) {
@@ -1196,7 +1250,48 @@ const ReleaseModalSession = ({
 
       const mode = getReleaseActionMode(release);
       if (mode === 'download') {
-        await onDownload(book, release, contentType);
+        // Look at the release's files before queueing so a whole-series pack can be
+        // reviewed and filed as separate books instead of one mangled item.
+        let inspected = false;
+        let plan: PackPlan | null = null;
+        let inspectedFiles: InspectReleaseResponse['files'] = [];
+        let reason: string | null = null;
+        try {
+          const inspection = await inspectRelease(
+            buildReleaseDownloadPayload(book, release, contentType),
+          );
+          inspected = inspection.inspected;
+          plan = inspection.plan;
+          inspectedFiles = inspection.files;
+          reason = inspection.reason;
+        } catch (error) {
+          console.error('Release inspection failed:', error);
+        }
+        if (inspected && plan?.is_pack) {
+          setPackReview({ release, plan, books: plan.books });
+          return;
+        }
+        if (inspected && chooseFormats && plan) {
+          const groups = groupFilesByFormat(
+            inspectedFiles,
+            new Set(plan.books.flatMap((planBook) => planBook.files)),
+          );
+          if (groups.length > 1) {
+            setFormatReview({ release, groups });
+            return;
+          }
+        }
+        // Not a pack (or couldn't be inspected): queue exactly as before. A release we
+        // couldn't inspect might still be an unnoticed pack, so leave a console breadcrumb
+        // rather than interrupting the user; the multi-book toggle forces the split.
+        if (!inspected && !multiBook) {
+          console.warn(
+            `Could not inspect release "${release.title}" before download${
+              reason ? `: ${reason}` : ''
+            }. If it contains several books, enable the multi-book pack toggle.`,
+          );
+        }
+        await onDownload(book, release, contentType, multiBook ? { multiBook: true } : {});
         handleClose();
         return;
       }
@@ -1215,7 +1310,50 @@ const ReleaseModalSession = ({
       onRequestRelease,
       contentType,
       handleClose,
+      multiBook,
+      chooseFormats,
     ],
+  );
+
+  const handleFormatConfirm = useCallback(
+    async (ignoredFiles: string[]): Promise<void> => {
+      if (!book || !formatReview) {
+        return;
+      }
+      setPackSubmitting(true);
+      try {
+        await onDownload(book, formatReview.release, contentType, { ignoredFiles });
+        handleClose();
+      } finally {
+        setPackSubmitting(false);
+      }
+    },
+    // oxlint-disable-next-line react/memo-dependencies
+    [book, formatReview, onDownload, contentType, handleClose],
+  );
+
+  const handlePackConfirm = useCallback(
+    async (books: PackBook[] | null, ignoredFiles: string[] = []): Promise<void> => {
+      if (!book || !packReview) {
+        return;
+      }
+      setPackSubmitting(true);
+      try {
+        await onDownload(
+          book,
+          packReview.release,
+          contentType,
+          books ? { multiBook: true, bookPlan: toBookPlanPayload(books), ignoredFiles } : {},
+        );
+        handleClose();
+      } finally {
+        setPackSubmitting(false);
+      }
+    },
+    // Same as handleRequestBook above: the body reads `onDownload`, `contentType` and
+    // `handleClose`, so they stay in the list whatever the advisory infers.
+    // oxlint-disable-next-line react/memo-dependencies
+    [book, packReview, onDownload, contentType, handleClose],
   );
 
   const titleId = `release-modal-title-${book.id}`;
@@ -1687,9 +1825,16 @@ const ReleaseModalSession = ({
                 </div>
               )}
               {!sourcesLoading && allTabs.length > 0 && (
-                <div className="flex items-center justify-between px-5">
-                  {/* Tabs - scrollable on narrow screens */}
-                  <div className="scrollbar-hide min-w-0 flex-1 overflow-x-auto">
+                <div
+                  className={`flex items-center px-5 ${allTabs.length > 1 ? 'flex-wrap sm:flex-nowrap' : ''}`}
+                >
+                  {/* Tabs - scrollable on narrow screens. With more than one source they get
+                      their own row on phones, because the controls would otherwise leave
+                      them about 110px. */}
+                  <div
+                    ref={tabStripRef}
+                    className={`scrollbar-hide min-w-0 flex-1 overflow-x-auto ${allTabs.length > 1 ? 'basis-full sm:basis-0' : ''}`}
+                  >
                     <div className="relative flex gap-1">
                       {/* Sliding indicator */}
                       <div
@@ -1706,7 +1851,7 @@ const ReleaseModalSession = ({
                           ref={(el) => {
                             tabRefs.current[tab.name] = el;
                           }}
-                          onClick={() => setActiveTab(tab.name)}
+                          onClick={(event) => selectTab(tab.name, event.currentTarget)}
                           className={`border-b-2 border-transparent px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors ${
                             activeTab === tab.name
                               ? 'text-emerald-600 dark:text-emerald-400'
@@ -1719,7 +1864,102 @@ const ReleaseModalSession = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 pr-1 pl-2">
+                  {/* Results count from release sources. Deliberately not flex-1: a
+                      second growing child would halve the scrollable tab strip beside
+                      it, and it would claim that space even on tabs whose source
+                      reports no total (only direct_download does). Hidden below sm:
+                      the label is ~150px and the full-screen mobile modal has no room
+                      for it without pushing the tabs out of reach. */}
+                  <div className="hidden flex-none justify-center sm:flex">
+                    {(() => {
+                      const searchInfo = releasesBySource[activeTab]?.search_info?.[activeTab];
+                      const totalCount = searchInfo?.total_results;
+                      if (totalCount === undefined || totalCount === null || totalCount === 0)
+                        return null;
+                      const isCapped = totalCount === '500+';
+                      const totalCountNum = isCapped ? 500 : Number(totalCount);
+                      // AA-style: show page range + total
+                      if (totalCountNum === 1) {
+                        return (
+                          <span className="mx-2 shrink-0 text-xs whitespace-nowrap text-gray-500 dark:text-gray-400">
+                            Result 1 (1 Total)
+                          </span>
+                        );
+                      }
+                      const shownEnd = Math.min(totalCountNum, 50);
+                      const totalStr = isCapped ? '500+' : String(totalCountNum);
+                      return (
+                        <span className="mx-2 shrink-0 text-xs whitespace-nowrap text-gray-500 dark:text-gray-400">
+                          Results 1-{shownEnd} ({totalStr} Total)
+                        </span>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Right: Controls */}
+                  <div className="ml-auto flex items-center gap-3 pr-1 pl-2">
+                    {/* Multi-book pack toggle (fallback for releases that can't be inspected) */}
+                    {!isCombinedMode && (
+                      <button
+                        type="button"
+                        onClick={() => setMultiBook((prev) => !prev)}
+                        className={`hover-surface relative rounded-full p-2.5 text-zinc-500 transition-colors dark:text-zinc-400 ${
+                          multiBook ? 'text-emerald-600 dark:text-emerald-400' : ''
+                        }`}
+                        aria-label="Multi-book pack"
+                        aria-pressed={multiBook}
+                        title="Multi-book pack: file each subfolder (or each file) as a separate book. Only needed when a release can't be inspected before download."
+                      >
+                        <svg
+                          className="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          strokeWidth={1.5}
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M6.429 9.75 2.25 12l4.179 2.25m0-4.5 5.571 3 5.571-3m-11.142 0L2.25 7.5 12 2.25l9.75 5.25-4.179 2.25m0 0L21.75 12l-4.179 2.25m0 0 4.179 2.25L12 21.75 2.25 16.5l4.179-2.25m11.142 0-5.571 3-5.571-3"
+                          />
+                        </svg>
+                        {multiBook && (
+                          <span className="absolute top-1 right-1 h-2 w-2 rounded-full bg-emerald-500" />
+                        )}
+                      </button>
+                    )}
+
+                    {/* Format picker toggle: choose which formats of a release to download */}
+                    {!isCombinedMode && (
+                      <button
+                        type="button"
+                        onClick={() => setChooseFormats((prev) => !prev)}
+                        className={`hover-surface relative rounded-full p-2.5 text-zinc-500 transition-colors dark:text-zinc-400 ${
+                          chooseFormats ? 'text-emerald-600 dark:text-emerald-400' : ''
+                        }`}
+                        aria-label="Choose formats"
+                        aria-pressed={chooseFormats}
+                        title="Choose formats: when a release has several formats, pick which ones to download."
+                      >
+                        <svg
+                          className="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          strokeWidth={1.5}
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75"
+                          />
+                        </svg>
+                        {chooseFormats && (
+                          <span className="absolute top-1 right-1 h-2 w-2 rounded-full bg-emerald-500" />
+                        )}
+                      </button>
+                    )}
+
                     {/* Manual query button */}
                     <button
                       type="button"
@@ -2120,6 +2360,30 @@ const ReleaseModalSession = ({
             {/* Release list content */}
             <div className="min-h-[200px]">
               {(() => {
+                if (formatReview) {
+                  return (
+                    <FormatReviewPanel
+                      release={formatReview.release}
+                      groups={formatReview.groups}
+                      onBack={() => setFormatReview(null)}
+                      onConfirm={handleFormatConfirm}
+                      isSubmitting={packSubmitting}
+                    />
+                  );
+                }
+                if (packReview) {
+                  return (
+                    <PackReviewPanel
+                      release={packReview.release}
+                      plan={packReview.plan}
+                      books={packReview.books}
+                      onChange={(books) => setPackReview({ ...packReview, books })}
+                      onBack={() => setPackReview(null)}
+                      onConfirm={handlePackConfirm}
+                      isSubmitting={packSubmitting}
+                    />
+                  );
+                }
                 if (sourcesLoading) {
                   return <ReleaseSkeleton />;
                 }
@@ -2335,7 +2599,7 @@ const ReleaseModalSession = ({
 
 export const ReleaseModal = ({ book, onClose, ...rest }: ReleaseModalProps) => {
   const [isClosing, setIsClosing] = useState(false);
-  const previousSessionKeyRef = useRef<string | null>(null);
+  const [enterAnimation, setEnterAnimation] = useState(INITIAL_ENTER_ANIMATION);
 
   const handleClose = useCallback(() => {
     setIsClosing(true);
@@ -2359,12 +2623,13 @@ export const ReleaseModal = ({ book, onClose, ...rest }: ReleaseModalProps) => {
       ].join('|')
     : null;
 
-  const animateEnter =
-    !rest.combinedMode ||
-    previousSessionKeyRef.current === null ||
-    previousSessionKeyRef.current === sessionKey;
-
-  previousSessionKeyRef.current = sessionKey;
+  // Decided once per session key and held for that session's lifetime, so a
+  // re-render mid-session cannot restart the enter animation.
+  const nextAnimation = nextEnterAnimation(enterAnimation, sessionKey, rest.combinedMode != null);
+  if (nextAnimation !== enterAnimation) {
+    setEnterAnimation(nextAnimation);
+  }
+  const animateEnter = nextAnimation.animate;
 
   if (!book && !isClosing) return null;
   if (!book || !sessionKey) return null;

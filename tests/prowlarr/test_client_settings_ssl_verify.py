@@ -1,5 +1,7 @@
 """SSL verification behavior for download client settings test callbacks."""
 
+from __future__ import annotations
+
 import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch

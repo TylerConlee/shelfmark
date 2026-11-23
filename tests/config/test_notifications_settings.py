@@ -1,5 +1,7 @@
 """Tests for notifications settings registration and validation."""
 
+from __future__ import annotations
+
 import shelfmark.config.notifications_settings as notifications_settings_module
 from shelfmark.core import settings_registry
 

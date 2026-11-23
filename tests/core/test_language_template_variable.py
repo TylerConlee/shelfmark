@@ -6,6 +6,8 @@ treats a folder as exactly one library item, so the two editions become a single
 book with both files as tracks (calibrain/shelfmark#1138).
 """
 
+from __future__ import annotations
+
 import pytest
 
 from shelfmark.core.models import DownloadTask

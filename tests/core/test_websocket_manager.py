@@ -1,5 +1,7 @@
 """Tests for WebSocket room scoping and SID room synchronization."""
 
+from __future__ import annotations
+
 from shelfmark.api import websocket as websocket_module
 from shelfmark.api.websocket import WebSocketManager
 

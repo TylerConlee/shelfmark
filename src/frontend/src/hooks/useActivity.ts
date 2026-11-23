@@ -103,6 +103,7 @@ const parseHistoryBook = (value: unknown): Book | null => {
     ...(typeof value.retry_available === 'boolean'
       ? { retry_available: value.retry_available }
       : {}),
+    ...(typeof value.downloads === 'number' ? { downloads: value.downloads } : {}),
   };
 };
 
@@ -278,7 +279,8 @@ interface UseActivityResult {
   activityHistoryHasMore: boolean;
   prefetchActivityHistory: () => void;
   refreshActivitySnapshot: () => Promise<void>;
-  handleActivityTabChange: (tab: 'all' | 'downloads' | 'requests' | 'history') => void;
+  refreshHistoryIfLoaded: () => void;
+  handleActivityTabChange: (tab: 'all' | 'downloads' | 'requests' | 'history' | 'rejected') => void;
   resetActivity: () => void;
   handleActivityHistoryLoadMore: () => void;
   handleRequestDismiss: (requestId: number) => void;
@@ -364,7 +366,7 @@ export const useActivity = ({
   }, [isAuthenticated, resetActivityHistory]);
 
   const handleActivityTabChange = useCallback(
-    (tab: 'all' | 'downloads' | 'requests' | 'history') => {
+    (tab: 'all' | 'downloads' | 'requests' | 'history' | 'rejected') => {
       if (tab !== 'history' || activityHistoryLoaded || activityHistoryLoading) {
         return;
       }
@@ -569,6 +571,7 @@ export const useActivity = ({
     activityHistoryHasMore,
     prefetchActivityHistory,
     refreshActivitySnapshot,
+    refreshHistoryIfLoaded,
     handleActivityTabChange,
     resetActivity,
     handleActivityHistoryLoadMore,

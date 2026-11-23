@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from email.utils import parseaddr
 from typing import Any, Protocol, SupportsIndex, SupportsInt, TypeGuard
 
 from shelfmark.core.config import config as app_config
@@ -101,7 +102,7 @@ def get_session_db_user_id(session_obj: object) -> int | None:
     raw = session_obj.get("db_user_id") if _is_mapping_with_get(session_obj) else None
     try:
         return int(raw) if raw is not None and _is_convertible_to_int(raw) else None
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
 
 
@@ -111,8 +112,14 @@ def coerce_int(value: object, default: int) -> int:
         return default
     try:
         return int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return default
+
+
+def is_plain_email_address(value: str) -> bool:
+    """Return True for a bare address like ``reader@example.com`` (no display name)."""
+    parsed = parseaddr(value or "")[1]
+    return bool(parsed) and "@" in parsed and parsed == value
 
 
 def normalize_optional_text(value: object) -> str | None:
@@ -129,7 +136,7 @@ def normalize_positive_int(value: object) -> int | None:
         return None
     try:
         parsed = int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
 
@@ -171,6 +178,23 @@ def populate_request_usernames(rows: list[dict[str, Any]], user_db: object) -> N
             requester = user_db.get_user(user_id=requester_id)
             cache[requester_id] = requester.get("username", "") if requester else ""
         row["username"] = cache[requester_id]
+
+
+def populate_request_reviewers(rows: list[dict[str, Any]], user_db: object) -> None:
+    """Add 'reviewer_username' to each reviewed request row. Admin views only."""
+    if not _is_user_db_like(user_db):
+        return
+
+    cache: dict[int, str] = {}
+    for row in rows:
+        reviewer_id = normalize_positive_int(row.get("reviewed_by"))
+        if reviewer_id is None:
+            row["reviewer_username"] = ""
+            continue
+        if reviewer_id not in cache:
+            reviewer = user_db.get_user(user_id=reviewer_id)
+            cache[reviewer_id] = reviewer.get("username", "") if reviewer else ""
+        row["reviewer_username"] = cache[reviewer_id]
 
 
 def extract_release_source_id(release_data: object) -> str | None:

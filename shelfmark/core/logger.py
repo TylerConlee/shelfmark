@@ -1,15 +1,26 @@
 """Logging configuration and custom logger with error tracing."""
 
+from __future__ import annotations
+
 import logging
 import sys
 from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
-from typing import TYPE_CHECKING
+from pathlib import Path
+from threading import Lock
 
 from shelfmark.config.env import ENABLE_LOGGING, LOG_FILE, LOG_LEVEL
+from shelfmark.core.redaction import redact_secrets
 
-if TYPE_CHECKING:
-    from pathlib import Path
+_file_handlers: dict[Path, RotatingFileHandler] = {}
+_file_handlers_lock = Lock()
+
+
+class RedactingFormatter(logging.Formatter):
+    """Formatter that masks credentials in the message, traceback and stack info."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
 
 
 class CustomLogger(logging.Logger):
@@ -78,10 +89,10 @@ class CustomLogger(logging.Logger):
                     proc_rss_mb = _get_process_rss_mb(proc)
                     if proc_rss_mb is not None:
                         app_memory_mb += proc_rss_mb
-            except PermissionError, psutil.AccessDenied, OSError:
+            except (PermissionError, psutil.AccessDenied, OSError):
                 try:
                     app_memory_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-                except AttributeError, OSError, psutil.Error:
+                except (AttributeError, OSError, psutil.Error):
                     app_memory_mb = 0.0
 
             memory = psutil.virtual_memory()
@@ -92,7 +103,7 @@ class CustomLogger(logging.Logger):
                 f"Container Memory: App={app_memory_mb:.2f} MB, System={system_used_mb:.2f} MB, "
                 f"Available={available_mb:.2f} MB, CPU: {cpu_percent:.2f}%"
             )
-        except AttributeError, OSError, psutil.Error:
+        except (AttributeError, OSError, psutil.Error):
             # Avoid breaking the original log call if psutil is missing or restricted.
             return
 
@@ -122,6 +133,22 @@ def _normalize_log_extra(value: object) -> Mapping[str, object] | None:
     return None
 
 
+def _get_file_handler(log_file: Path, formatter: logging.Formatter) -> RotatingFileHandler:
+    """Return the process-wide rotating handler for a log file."""
+    with _file_handlers_lock:
+        handler = _file_handlers.get(log_file)
+        if handler is None:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(
+                log_file,
+                maxBytes=10485760,  # 10MB
+                backupCount=5,
+            )
+            handler.setFormatter(formatter)
+            _file_handlers[log_file] = handler
+        return handler
+
+
 def setup_logger(name: str, log_file: Path = LOG_FILE) -> CustomLogger:
     """Set up and configure a logger instance.
 
@@ -141,7 +168,7 @@ def setup_logger(name: str, log_file: Path = LOG_FILE) -> CustomLogger:
     log_level = getattr(logging, LOG_LEVEL, logging.INFO)
     logger.setLevel(log_level)
 
-    formatter = logging.Formatter(
+    formatter = RedactingFormatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
     )
 
@@ -163,16 +190,7 @@ def setup_logger(name: str, log_file: Path = LOG_FILE) -> CustomLogger:
     # File handler if log file is specified
     try:
         if ENABLE_LOGGING:
-            # Create log directory if it doesn't exist
-            log_dir = log_file.parent
-            log_dir.mkdir(parents=True, exist_ok=True)
-            file_handler = RotatingFileHandler(
-                log_file,
-                maxBytes=10485760,  # 10MB
-                backupCount=5,
-            )
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
+            logger.addHandler(_get_file_handler(log_file, formatter))
     except (OSError, TypeError, ValueError) as e:
         logger.error_trace(f"Failed to create log file: {e}", exc_info=True)
 

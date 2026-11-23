@@ -6,7 +6,12 @@ Requires a free API key from Google Cloud Console (~1000 requests/day quota).
 API Documentation: https://developers.google.com/books/docs/v1/using
 """
 
+from __future__ import annotations
+
+import html
+import re
 from contextlib import suppress
+from dataclasses import replace
 from http import HTTPStatus
 from typing import Any, ClassVar
 
@@ -32,6 +37,7 @@ from shelfmark.metadata_providers import (
     MetadataProvider,
     MetadataSearchOptions,
     SearchField,
+    SearchResult,
     SearchType,
     SortOrder,
     TextSearchField,
@@ -40,6 +46,36 @@ from shelfmark.metadata_providers import (
 )
 
 logger = setup_logger(__name__)
+
+# A tag starts with a letter after "<" or "</", so "2 < 3 and a > b" is left alone.
+_HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^<>]*>")
+# A br with attributes is still a line break; the word boundary keeps out any other tag
+# whose name only starts with "br".
+_LINE_BREAK_RE = re.compile(r"<br\b[^<>]*>", re.IGNORECASE)
+_BLOCK_END_RE = re.compile(r"</(?:p|div|li|ul|ol|h[1-6]|blockquote)\s*>", re.IGNORECASE)
+_TRAILING_SPACE_RE = re.compile(r"[ \t]+\n")
+_EXTRA_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+def _description_to_text(description: object) -> str | None:
+    """Turn a Google Books description, which is HTML, into plain text.
+
+    The UI renders a description as text, never as markup, so leaving the HTML in showed
+    every description with its tags, starting with a literal "<p>". Converting it here
+    keeps the paragraph and line breaks, which the details view preserves, and avoids
+    putting markup from the API into the page.
+    """
+    if not isinstance(description, str):
+        return None
+    text = _LINE_BREAK_RE.sub("\n", description)
+    text = _BLOCK_END_RE.sub("\n\n", text)
+    text = _HTML_TAG_RE.sub("", text)
+    # Entities are decoded after the tags are gone, so an escaped "&lt;b&gt;" stays text.
+    text = html.unescape(text)
+    text = _TRAILING_SPACE_RE.sub("\n", text)
+    text = _EXTRA_BLANK_LINES_RE.sub("\n\n", text).strip()
+    return text or None
+
 
 _HTTP_STATUS_FORBIDDEN = HTTPStatus.FORBIDDEN
 _HTTP_STATUS_BAD_REQUEST = HTTPStatus.BAD_REQUEST
@@ -158,10 +194,11 @@ class GoogleBooksProvider(MetadataProvider):
         query = "+".join(query_parts)
 
         # Build request params
+        page_size = min(options.limit, 40)  # Google max is 40
         params: dict[str, Any] = {
             "q": query,
-            "maxResults": min(options.limit, 40),  # Google max is 40
-            "startIndex": (options.page - 1) * options.limit,
+            "maxResults": page_size,
+            "startIndex": (options.page - 1) * page_size,
             "printType": "books",  # Exclude magazines
         }
 
@@ -210,6 +247,10 @@ class GoogleBooksProvider(MetadataProvider):
         except Exception:
             logger.exception("Google Books get_book error")
             return None
+
+    def search_paginated(self, options: MetadataSearchOptions) -> SearchResult:
+        """Google returns at most 40 per page, so a full page is 40 whatever limit asked for."""
+        return super().search_paginated(replace(options, limit=min(options.limit, 40)))
 
     @cacheable(
         ttl_key="METADATA_CACHE_BOOK_TTL",
@@ -334,8 +375,8 @@ class GoogleBooksProvider(MetadataProvider):
             # Genres/categories (limit to 5)
             genres = volume_info.get("categories", [])[:5]
 
-            # Description (may contain HTML - leave as-is for UI to sanitize)
-            description = volume_info.get("description")
+            # Description: the API sends HTML, the UI shows text
+            description = _description_to_text(volume_info.get("description"))
 
             # Source URL
             source_url = volume_info.get("infoLink")

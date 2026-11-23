@@ -6,6 +6,8 @@ Available when IRC server, channel, and nickname are configured in settings.
 Based on OpenBooks (https://github.com/evan-buss/openbooks).
 """
 
+from __future__ import annotations
+
 from shelfmark.release_sources.irc import handler as handler
 from shelfmark.release_sources.irc import settings as settings
 from shelfmark.release_sources.irc import source as source

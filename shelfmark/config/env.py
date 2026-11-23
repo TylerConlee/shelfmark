@@ -1,9 +1,12 @@
 """Bootstrap environment variables. No local dependencies - import first."""
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -25,7 +28,7 @@ def _read_advanced_config(key: str) -> object | None:
                 config = json.load(f)
                 if key in config:
                     return config[key]
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):
             pass
 
     return None
@@ -84,7 +87,7 @@ def _is_sqlite_file(path: Path) -> bool:
         with path.open("rb") as f:
             header = f.read(16)
             return header[:16] == b"SQLite format 3\x00"
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         return False
 
 
@@ -112,10 +115,32 @@ def _is_config_dir_writable() -> bool:
         test_file = CONFIG_DIR / ".write_test"
         test_file.touch()
         test_file.unlink()
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         return False
     else:
         return True
+
+
+# The probe above creates and deletes a file, and cover URLs are rewritten per result,
+# per queue task and per history row, so it is remembered for a short time.
+_WRITABLE_PROBE_TTL_SECONDS = 60.0
+_writable_probe: tuple[float, bool] | None = None
+
+
+def _config_dir_writable_cached() -> bool:
+    global _writable_probe
+    now = time.monotonic()
+    if _writable_probe is not None and now - _writable_probe[0] < _WRITABLE_PROBE_TTL_SECONDS:
+        return _writable_probe[1]
+    writable = _is_config_dir_writable()
+    _writable_probe = (now, writable)
+    return writable
+
+
+def reset_config_dir_writable_cache() -> None:
+    """Forget the remembered probe (tests change the directory under it)."""
+    global _writable_probe
+    _writable_probe = None
 
 
 def is_covers_cache_enabled() -> bool:
@@ -124,8 +149,8 @@ def is_covers_cache_enabled() -> bool:
 
     setting_enabled = config.get("COVERS_CACHE_ENABLED", True)
     if isinstance(setting_enabled, str):
-        return string_to_bool(setting_enabled) and _is_config_dir_writable()
-    return bool(setting_enabled) and _is_config_dir_writable()
+        return string_to_bool(setting_enabled) and _config_dir_writable_cached()
+    return bool(setting_enabled) and _config_dir_writable_cached()
 
 
 # =============================================================================
@@ -155,6 +180,13 @@ ENABLE_LOGGING = string_to_bool(os.getenv("ENABLE_LOGGING", "true"))
 
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "8084"))
+# Extra origins allowed to open the Socket.IO websocket, comma separated. Needed
+# only when a reverse proxy changes Host and sends no X-Forwarded-Host/Proto.
+SOCKETIO_ALLOWED_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("SOCKETIO_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip().rstrip("/")
+]
 
 
 # =============================================================================
@@ -166,6 +198,11 @@ SESSION_COOKIE_NAME = "shelfmark_session"
 CWA_DB_PATH = _resolve_cwa_db_path()
 HIDE_LOCAL_AUTH = string_to_bool(os.getenv("HIDE_LOCAL_AUTH", "false"))
 DISABLE_LOCAL_AUTH = string_to_bool(os.getenv("DISABLE_LOCAL_AUTH", "false"))
+# Optional static API key. When set, requests carrying it as a Bearer token
+# (or X-Api-Key) are authenticated as an admin for that request only.
+SHELFMARK_API_KEY = os.getenv("SHELFMARK_API_KEY", "").strip()
+# Optional second key that can only read /api/stats (dashboards). Never an admin.
+SHELFMARK_API_KEY_READONLY = os.getenv("SHELFMARK_API_KEY_READONLY", "").strip()
 OIDC_AUTO_REDIRECT = string_to_bool(os.getenv("OIDC_AUTO_REDIRECT", "false"))
 
 
@@ -202,6 +239,21 @@ ONBOARDING = string_to_bool(os.getenv("ONBOARDING", "true"))
 # Comma-separated values: aa-fast, aa-slow-nowait, aa-slow-wait, libgen, zlib, welib
 _DEBUG_SKIP_SOURCES_RAW = os.getenv("DEBUG_SKIP_SOURCES", "").strip().lower()
 DEBUG_SKIP_SOURCES = {s.strip() for s in _DEBUG_SKIP_SOURCES_RAW.split(",") if s.strip()}
+
+# Debug: keep DDoS-Guard's __ddg8_/__ddg9_/__ddg10_ in the clearance store instead of
+# dropping them after a solve.
+#
+# Which of DDoS-Guard's cookies actually *are* clearance is not settled. The store treats
+# the trio as describing one check (client IP, timestamp, token) and drops them, on the
+# reasoning that replaying a stale IP/timestamp is what re-arms the ?check=1 loop - see
+# shelfmark.bypass.cookie_store. Field reports on issue #1276 point the other way: every
+# request after a successful solve was challenged again, which is only consistent with
+# what the store keeps not being sufficient clearance on its own.
+#
+# Deliberately env-only and off by default: this is a knob for reproducing the question
+# against a live host, not a setting to offer users. Set it to true, solve once, and watch
+# whether the next search still logs "Redirect loop detected".
+DDG_REPLAY_PER_CHECK_COOKIES = string_to_bool(os.getenv("DDG_REPLAY_PER_CHECK_COOKIES", "false"))
 
 
 # =============================================================================

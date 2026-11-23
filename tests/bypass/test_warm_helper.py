@@ -4,6 +4,8 @@ The browser is deliberately not kept: every bypass starts and closes its own Chr
 survives is the helper process, whose interpreter start and imports are pure overhead.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 

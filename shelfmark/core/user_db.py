@@ -1,9 +1,12 @@
 """SQLite user database for multi-user support."""
 
+from __future__ import annotations
+
 import json
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -21,8 +24,14 @@ from shelfmark.core.request_validation import (
     validate_request_level_payload,
     validate_status_transition,
 )
+from shelfmark.core.utils import DB_BUSY_TIMEOUT_SECONDS
 
 logger = setup_logger(__name__)
+
+# How long get_user_cached may answer from memory. Writes through the same UserDB drop
+# the cache at once, so this only bounds changes made by another process or instance.
+USER_CACHE_TTL_SECONDS = 5.0
+_USER_CACHE_MAX_ENTRIES = 256
 
 _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -87,7 +96,8 @@ CREATE TABLE IF NOT EXISTS download_history (
     download_path TEXT,
     retry_payload TEXT,
     queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    terminal_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    terminal_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    downloads INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_download_history_user_status
@@ -113,6 +123,13 @@ WHERE dismissed_at IS NOT NULL AND cleared_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_activity_view_state_hidden
 ON activity_view_state (viewer_scope, item_type, item_key)
 WHERE dismissed_at IS NOT NULL;
+
+-- Fork: rejected requests an admin hid from the Rejected view. Separate from
+-- activity_view_state, which is the activity list's own clear/dismiss state.
+CREATE TABLE IF NOT EXISTS rejected_request_hidden (
+    request_id INTEGER PRIMARY KEY REFERENCES download_requests(id) ON DELETE CASCADE,
+    hidden_at TEXT NOT NULL
+);
 """
 
 
@@ -122,6 +139,31 @@ def _require_loaded_user(user: dict[str, Any] | None) -> dict[str, Any]:
         msg = "Failed to load newly created user"
         raise RuntimeError(msg)
     return user
+
+
+def _book_data_with_failed_release(request_row: dict[str, Any]) -> dict[str, Any] | None:
+    """The request's book data with the release it was fulfilled with added to ``failed_releases``.
+
+    None when there is nothing to add: no readable release, or it is already listed.
+    """
+    book_data = request_row.get("book_data")
+    release_data = request_row.get("release_data")
+    if not isinstance(book_data, dict) or not isinstance(release_data, dict):
+        return None
+    source = str(release_data.get("source") or "").strip()
+    source_id = str(release_data.get("source_id") or "").strip()
+    if not source or not source_id:
+        return None
+    tried = book_data.get("failed_releases")
+    tried = list(tried) if isinstance(tried, list) else []
+    if any(
+        isinstance(entry, dict)
+        and entry.get("source") == source
+        and entry.get("source_id") == source_id
+        for entry in tried
+    ):
+        return None
+    return {**book_data, "failed_releases": [*tried, {"source": source, "source_id": source_id}]}
 
 
 def get_users_db_path(config_dir: str | None = None) -> str:
@@ -186,9 +228,17 @@ class UserDB:
         """Initialize the user database wrapper for the given SQLite path."""
         self._db_path = db_path
         self._lock = threading.Lock()
+        self._user_cache: dict[tuple[str, object], tuple[float, dict[str, Any] | None]] = {}
+        self._user_cache_lock = threading.Lock()
+        self._user_cache_generation = 0
+
+    @property
+    def db_path(self) -> str:
+        """Filesystem path of the SQLite database."""
+        return self._db_path
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=DB_BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
@@ -203,6 +253,7 @@ class UserDB:
                 self._migrate_request_delivery_columns(conn)
                 self._migrate_download_history_queued_at(conn)
                 self._migrate_download_history_retry_payload(conn)
+                self._migrate_download_history_downloads(conn)
                 conn.commit()
                 # WAL mode must be changed outside an open transaction.
                 conn.execute("PRAGMA journal_mode=WAL")
@@ -270,6 +321,13 @@ class UserDB:
         if "retry_payload" not in column_names:
             conn.execute("ALTER TABLE download_history ADD COLUMN retry_payload TEXT")
 
+    def _migrate_download_history_downloads(self, conn: sqlite3.Connection) -> None:
+        """Ensure download_history.downloads exists for download count persistence."""
+        columns = conn.execute("PRAGMA table_info(download_history)").fetchall()
+        column_names = {str(col["name"]) for col in columns}
+        if "downloads" not in column_names:
+            conn.execute("ALTER TABLE download_history ADD COLUMN downloads INTEGER")
+
     def create_user(
         self,
         username: str,
@@ -303,6 +361,7 @@ class UserDB:
                     ),
                 )
                 conn.commit()
+                self._drop_user_cache()
                 user_id = cursor.lastrowid
                 if not isinstance(user_id, int):
                     msg = "Failed to create user"
@@ -337,6 +396,36 @@ class UserDB:
             return dict(row) if row else None
         finally:
             conn.close()
+
+    def get_user_cached(
+        self, *, user_id: int | None = None, username: str | None = None
+    ) -> dict[str, Any] | None:
+        """Get a user like get_user, answering repeats from memory for a few seconds.
+
+        For hot paths such as per-request proxy auth, where every API call (cover
+        images included) would otherwise open a connection for the same row.
+        """
+        key = ("id", user_id) if user_id is not None else ("username", username)
+        now = time.monotonic()
+        with self._user_cache_lock:
+            cached = self._user_cache.get(key)
+            if cached is not None and cached[0] > now:
+                return dict(cached[1]) if cached[1] else None
+            generation = self._user_cache_generation
+
+        user = self.get_user(user_id=user_id, username=username)
+        with self._user_cache_lock:
+            # A write that landed during the read may have made this row stale.
+            if generation == self._user_cache_generation:
+                if len(self._user_cache) >= _USER_CACHE_MAX_ENTRIES:
+                    self._user_cache.clear()
+                self._user_cache[key] = (now + USER_CACHE_TTL_SECONDS, user)
+        return dict(user) if user else None
+
+    def _drop_user_cache(self) -> None:
+        with self._user_cache_lock:
+            self._user_cache.clear()
+            self._user_cache_generation += 1
 
     def _get_user_by_id(self, conn: sqlite3.Connection, user_id: int) -> dict[str, Any] | None:
         row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -384,6 +473,7 @@ class UserDB:
                 for column, value in kwargs.items():
                     conn.execute(self._USER_UPDATE_STATEMENTS[column], (value, user_id))
                 conn.commit()
+                self._drop_user_cache()
             finally:
                 conn.close()
 
@@ -412,6 +502,7 @@ class UserDB:
                 )
                 conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
                 conn.commit()
+                self._drop_user_cache()
             finally:
                 conn.close()
 
@@ -421,6 +512,26 @@ class UserDB:
         try:
             rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_first_admin(self) -> dict[str, Any] | None:
+        """Return the lowest-id admin user, or None. Used as the identity for SHELFMARK_API_KEY requests."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def has_admin(self) -> bool:
+        """Return True when at least one admin user exists."""
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+            return row is not None
         finally:
             conn.close()
 
@@ -499,7 +610,7 @@ class UserDB:
                 continue
             try:
                 payload[key] = json.loads(raw_value)
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 payload[key] = None
         return payload
 
@@ -842,11 +953,22 @@ class UserDB:
         request_id: int,
         *,
         failure_reason: str | None = None,
+        remember_failed_release: bool = False,
+        admin_note: str | None = None,
     ) -> dict[str, Any] | None:
-        """Reopen a failed fulfilled request so admins can re-approve it."""
+        """Reopen a failed fulfilled request so admins can re-approve it.
+
+        With ``remember_failed_release``, the release it was fulfilled with is added to
+        ``book_data["failed_releases"]`` in the same write that reopens it, so a search that
+        picks the request up as soon as it is pending already skips that release. An
+        ``admin_note`` is written in that same write; None leaves the current note alone.
+        """
         normalized_failure_reason = None
         if isinstance(failure_reason, str):
             normalized_failure_reason = failure_reason.strip() or None
+        normalized_admin_note = None
+        if isinstance(admin_note, str):
+            normalized_admin_note = admin_note.strip() or None
 
         with self._lock:
             conn = self._connect()
@@ -874,6 +996,16 @@ class UserDB:
                 ):
                     return None
 
+                failed_book_data = (
+                    _book_data_with_failed_release(current_request)
+                    if remember_failed_release
+                    else None
+                )
+                book_data_json = (
+                    None
+                    if failed_book_data is None
+                    else self._serialize_json(failed_book_data, "book_data")
+                )
                 conn.execute(
                     """
                     UPDATE download_requests
@@ -881,12 +1013,110 @@ class UserDB:
                         delivery_state = 'none',
                         delivery_updated_at = NULL,
                         release_data = NULL,
+                        book_data = COALESCE(?, book_data),
                         last_failure_reason = ?,
+                        admin_note = COALESCE(?, admin_note),
                         reviewed_by = NULL,
                         reviewed_at = NULL
                     WHERE id = ?
                     """,
-                    (normalized_failure_reason, request_id),
+                    (book_data_json, normalized_failure_reason, normalized_admin_note, request_id),
+                )
+                updated_row = conn.execute(
+                    "SELECT * FROM download_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                conn.commit()
+                return self._parse_request_row(updated_row)
+            finally:
+                conn.close()
+
+    def list_hidden_rejected_request_ids(self) -> list[int]:
+        """Ids of rejected requests hidden from the admin Rejected view."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT h.request_id FROM rejected_request_hidden h
+                JOIN download_requests r ON r.id = h.request_id
+                WHERE r.status = 'rejected'
+                ORDER BY h.request_id
+                """
+            ).fetchall()
+            return [int(row["request_id"]) for row in rows]
+        finally:
+            conn.close()
+
+    def set_rejected_request_hidden(self, request_id: int, *, hidden: bool) -> bool:
+        """Hide or show a rejected request in the Rejected view. False if it is not rejected."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT status FROM download_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                if row is None or row["status"] != RequestStatus.REJECTED:
+                    return False
+                if hidden:
+                    conn.execute(
+                        """
+                        INSERT INTO rejected_request_hidden (request_id, hidden_at)
+                        VALUES (?, datetime('now'))
+                        ON CONFLICT(request_id) DO NOTHING
+                        """,
+                        (request_id,),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM rejected_request_hidden WHERE request_id = ?",
+                        (request_id,),
+                    )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
+    def reopen_rejected_request(
+        self,
+        request_id: int,
+        *,
+        admin_note: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Move a rejected request back to pending so an admin can review it again.
+
+        Terminal statuses are immutable through ``update_request``, so this is its own
+        narrow path, like ``reopen_failed_request``. The request keeps what the user asked
+        for (``request_level``, ``release_data``, ``note``); only the review is undone.
+        Returns None unless the request exists and is currently rejected.
+        """
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT status FROM download_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                if row is None or row["status"] != RequestStatus.REJECTED:
+                    return None
+
+                conn.execute(
+                    """
+                    UPDATE download_requests
+                    SET status = 'pending',
+                        delivery_state = 'none',
+                        delivery_updated_at = NULL,
+                        last_failure_reason = NULL,
+                        admin_note = ?,
+                        reviewed_by = NULL,
+                        reviewed_at = NULL
+                    WHERE id = ? AND status = 'rejected'
+                    """,
+                    (admin_note, request_id),
+                )
+                conn.execute(
+                    "DELETE FROM rejected_request_hidden WHERE request_id = ?",
+                    (request_id,),
                 )
                 updated_row = conn.execute(
                     "SELECT * FROM download_requests WHERE id = ?",

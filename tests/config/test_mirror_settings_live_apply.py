@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 def test_update_settings_mirrors_applies_aa_changes_live(monkeypatch):
     # Ensure settings tabs are registered (mirrors tab lives here).
     import shelfmark.config.settings  # noqa: F401

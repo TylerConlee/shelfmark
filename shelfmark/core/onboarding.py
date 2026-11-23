@@ -4,6 +4,8 @@ Defines the steps and fields for the first-run onboarding experience.
 Reuses field definitions from the settings registry where possible.
 """
 
+from __future__ import annotations
+
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -264,6 +266,11 @@ def get_metadata_provider_fields() -> list[SettingsField]:
                 "value": "googlebooks",
                 "label": "Google Books",
                 "description": "Google's book database with good coverage. Requires free API key.",
+            },
+            {
+                "value": "dnb",
+                "label": "DNB (Deutsche Nationalbibliothek)",
+                "description": "German national library catalog with the best coverage of German-language editions. No API key required.",
             },
         ]
 

@@ -5,6 +5,8 @@ Tests the OIDCAuth helper: login URL generation, callback handling,
 user provisioning, and group claim parsing.
 """
 
+from __future__ import annotations
+
 import os
 import tempfile
 

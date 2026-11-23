@@ -7,6 +7,8 @@ with various authentication modes.
 Run with: uv run pytest tests/e2e/ -v -m e2e
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 from uuid import uuid4
 

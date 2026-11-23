@@ -1,5 +1,7 @@
 """Core settings registration and derived configuration values."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +38,12 @@ from shelfmark.core.settings_registry import (
     register_on_save,
     register_settings,
 )
-from shelfmark.core.utils import ARCHIVE_FORMATS, AUDIOBOOK_FORMATS
+from shelfmark.core.utils import (
+    ARCHIVE_FORMATS,
+    AUDIOBOOK_FORMATS,
+    DEFAULT_AUDIOBOOK_FORMATS,
+    DEFAULT_EBOOK_FORMATS,
+)
 
 _DOWNLOAD_CLIENT_COMPLETED_PATH_TIMEOUT_DEFAULT = 60
 _DOWNLOAD_CLIENT_COMPLETED_PATH_TIMEOUT_MAX = 3600
@@ -65,7 +72,7 @@ def _on_save_advanced(values: dict[str, Any]) -> dict[str, Any]:
             }
         try:
             timeout_seconds = int(raw_timeout)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return {
                 "error": True,
                 "message": "Completed Path Wait must be a number of seconds",
@@ -204,6 +211,7 @@ register_group(
 
 # Direct mode sort options
 _AA_SORT_OPTIONS = [
+    {"value": "", "label": "Most downloads"},
     {"value": "relevance", "label": "Most relevant"},
     {"value": "newest", "label": "Newest (publication year)"},
     {"value": "oldest", "label": "Oldest (publication year)"},
@@ -388,6 +396,20 @@ def _clear_metadata_cache(current_values: dict) -> dict:
         }
 
 
+def _test_calibre_library(current_values: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Action-button callback: read the Calibre database and count the books."""
+    from shelfmark.core import library_index
+
+    return library_index.test_connection("calibre", current_values)
+
+
+def _test_audiobookshelf_library(current_values: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Action-button callback: read the Audiobookshelf libraries and count the items."""
+    from shelfmark.core import library_index
+
+    return library_index.test_connection("audiobookshelf", current_values)
+
+
 @register_settings("general", "General", icon="settings", order=0)
 def general_settings() -> list[SettingsField]:
     """Core application settings."""
@@ -411,6 +433,66 @@ def general_settings() -> list[SettingsField]:
             description="Adds a separate navigation button for your audiobook library (Audiobookshelf, Plex, etc). When both URLs are set, icons are shown instead of text.",
             placeholder="http://audiobookshelf:8080",
         ),
+        CheckboxField(
+            key="LIBRARY_CHECK_CALIBRE_ENABLED",
+            label="Mark books already in your Calibre library",
+            description=(
+                "Read the Calibre metadata.db and mark search results you already own, so you "
+                "do not download a second copy. Read only, nothing is written to the library."
+            ),
+            default=False,
+        ),
+        TextField(
+            key="CALIBRE_LIBRARY_DB_PATH",
+            label="Calibre metadata.db path",
+            description=(
+                "Path to metadata.db as seen from inside the Shelfmark container. Mount the "
+                "Calibre library folder read-only, e.g. /path/to/calibre-library:/calibre-library:ro."
+            ),
+            default="/calibre-library/metadata.db",
+            placeholder="/calibre-library/metadata.db",
+        ),
+        ActionButton(
+            key="test_calibre_library",
+            label="Test Calibre library",
+            description="Check that Shelfmark can read the Calibre database and count the books.",
+            callback=_test_calibre_library,
+        ),
+        CheckboxField(
+            key="LIBRARY_CHECK_AUDIOBOOKSHELF_ENABLED",
+            label="Mark audiobooks already in your Audiobookshelf library",
+            description=(
+                "Ask your Audiobookshelf server which audiobooks you already own, so synced "
+                "and automatic downloads skip them. Read only, nothing is written to Audiobookshelf."
+            ),
+            default=False,
+        ),
+        TextField(
+            key="AUDIOBOOKSHELF_URL",
+            label="Audiobookshelf URL",
+            description=(
+                "Base URL reachable from the Shelfmark container (not the public URL). Often the "
+                "host LAN IP, e.g. http://10.0.0.91:13378."
+            ),
+            placeholder="http://10.0.0.91:13378",
+        ),
+        PasswordField(
+            key="AUDIOBOOKSHELF_TOKEN",
+            label="Audiobookshelf API Token",
+            description="API token from Audiobookshelf (Settings > Users > your user > API Token).",
+        ),
+        TextField(
+            key="AUDIOBOOKSHELF_LIBRARY_IDS",
+            label="Audiobookshelf Library IDs (optional)",
+            description="Comma-separated library IDs to check. Leave blank for all book libraries.",
+            placeholder="Blank = all book libraries",
+        ),
+        ActionButton(
+            key="test_audiobookshelf_library",
+            label="Test Audiobookshelf library",
+            description="Check that Shelfmark can reach Audiobookshelf and count the items.",
+            callback=_test_audiobookshelf_library,
+        ),
         HeadingField(
             key="search_defaults_heading",
             title="Default Search Filters",
@@ -421,21 +503,14 @@ def general_settings() -> list[SettingsField]:
             label="Supported Book Formats",
             description="Book formats to include in search results. ZIP/RAR archives are extracted automatically and book files are used if found.",
             options=_FORMAT_OPTIONS,
-            default=["epub", "mobi", "azw3", "fb2", "djvu", "cbz", "cbr"],
+            default=list(DEFAULT_EBOOK_FORMATS),
         ),
         MultiSelectField(
             key="SUPPORTED_AUDIOBOOK_FORMATS",
             label="Supported Audiobook Formats",
             description="Audiobook formats to include in search results. ZIP/RAR archives are extracted automatically and audiobook files are used if found.",
             options=_AUDIOBOOK_FORMAT_OPTIONS,
-            default=[*AUDIOBOOK_FORMATS, *ARCHIVE_FORMATS],
-        ),
-        MultiSelectField(
-            key="BOOK_LANGUAGE",
-            label="Default Book Languages",
-            description="Default language filter for searches.",
-            options=_LANGUAGE_OPTIONS,
-            default=["en"],
+            default=list(DEFAULT_AUDIOBOOK_FORMATS),
         ),
     ]
 
@@ -474,12 +549,37 @@ def search_mode_settings() -> list[SettingsField]:
             default="universal",
             user_overridable=True,
         ),
+        MultiSelectField(
+            key="BOOK_LANGUAGE",
+            label="Default Book Languages",
+            description=(
+                "Default language filter for searches. Users can override this for their "
+                "own account."
+            ),
+            options=_LANGUAGE_OPTIONS,
+            default=["en"],
+            user_overridable=True,
+        ),
+        SelectField(
+            key="DEFAULT_CONTENT_TYPE",
+            label="Default Content Type",
+            description=(
+                "Which tab the search page opens on. Users can override this for their "
+                "own account, and a browser that has already picked a tab keeps its choice."
+            ),
+            options=[
+                {"value": "ebook", "label": "Ebook"},
+                {"value": "audiobook", "label": "Audiobook"},
+            ],
+            default="ebook",
+            user_overridable=True,
+        ),
         SelectField(
             key="AA_DEFAULT_SORT",
             label="Default Sort Order",
             description="Default sort order for search results.",
             options=_AA_SORT_OPTIONS,
-            default="relevance",
+            default="",
             show_when={"field": "SEARCH_MODE", "value": "direct"},
         ),
         CheckboxField(
@@ -558,6 +658,51 @@ def search_mode_settings() -> list[SettingsField]:
             description="The release source tab to open by default in the release modal for audiobooks. Uses the book release source if not set.",
             options=_get_audiobook_release_source_options,  # Callable - evaluated lazily to avoid circular imports
             default="",
+            show_when={"field": "SEARCH_MODE", "value": "universal"},
+            user_overridable=True,
+        ),
+        HeadingField(
+            key="release_columns_heading",
+            title="Release List Columns",
+            description=(
+                "Optional columns in the release list. Rows stay blank where a source "
+                "doesn't provide the detail."
+            ),
+            show_when={"field": "SEARCH_MODE", "value": "universal"},
+        ),
+        CheckboxField(
+            key="SHOW_SERIES_COLUMN",
+            label="Show Series Column",
+            description=(
+                "Series name and number, for books and audiobooks. Filled in for "
+                "MyAnonamouse results from Prowlarr when a MAM session ID is set in the "
+                "Prowlarr settings."
+            ),
+            default=True,
+            show_when={"field": "SEARCH_MODE", "value": "universal"},
+            user_overridable=True,
+        ),
+        CheckboxField(
+            key="SHOW_NARRATOR_COLUMN",
+            label="Show Narrator Column",
+            description=(
+                "Audiobooks only. Filled in for MyAnonamouse results from Prowlarr when a "
+                "MAM session ID is set in the Prowlarr settings."
+            ),
+            default=True,
+            show_when={"field": "SEARCH_MODE", "value": "universal"},
+            user_overridable=True,
+        ),
+        CheckboxField(
+            key="SHOW_BITRATE_COLUMN",
+            label="Show Bitrate Column",
+            description=(
+                "Audiobooks only. AudiobookBay lists it for most releases. In Prowlarr "
+                "results it needs a MAM session ID and is read from the MyAnonamouse "
+                "uploader's tags, so some releases won't have one. Other Prowlarr indexers "
+                "fill it only if they report a bitrate attribute, which most don't."
+            ),
+            default=True,
             show_when={"field": "SEARCH_MODE", "value": "universal"},
             user_overridable=True,
         ),
@@ -676,7 +821,7 @@ def network_settings() -> list[SettingsField]:
         TextField(
             key="HTTP_PROXY",
             label="HTTP Proxy",
-            description="HTTP proxy URL (e.g., http://proxy:8080)",
+            description="HTTP proxy URL. Supports auth: http://user:pass@host:port",
             placeholder="http://proxy:8080",
             disabled=tor_overrides_network,
             disabled_reason="Proxy settings are not used when Tor routing is enabled.",
@@ -685,7 +830,7 @@ def network_settings() -> list[SettingsField]:
         TextField(
             key="HTTPS_PROXY",
             label="HTTPS Proxy",
-            description="HTTPS proxy URL (leave empty to use HTTP proxy for HTTPS)",
+            description="HTTPS proxy URL (leave empty to use HTTP proxy for HTTPS). Supports auth: http://user:pass@host:port",
             placeholder="http://proxy:8080",
             disabled=tor_overrides_network,
             disabled_reason="Proxy settings are not used when Tor routing is enabled.",
@@ -782,15 +927,13 @@ def _on_save_downloads(values: dict[str, Any]) -> dict[str, Any]:
     if books_output_mode == "email":
         from email.utils import parseaddr
 
-        def _is_plain_email_address(addr: str) -> bool:
-            parsed = parseaddr(addr or "")[1]
-            return bool(parsed) and "@" in parsed and parsed == addr
+        from shelfmark.core.request_helpers import is_plain_email_address
 
         # Preferred model: single recipient for global default and per-user override.
         raw_recipient = str(effective.get("EMAIL_RECIPIENT", "") or "").strip()
 
         # Optional global fallback: validate only when a default recipient is provided.
-        if raw_recipient and not _is_plain_email_address(raw_recipient):
+        if raw_recipient and not is_plain_email_address(raw_recipient):
             return {
                 "error": True,
                 "message": "Email recipient must be a valid plain email address.",
@@ -811,7 +954,7 @@ def _on_save_downloads(values: dict[str, Any]) -> dict[str, Any]:
 
         try:
             port = int(effective.get("EMAIL_SMTP_PORT", 587))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return {"error": True, "message": "SMTP port must be a number", "values": values}
 
         if port < 1 or port > _SMTP_PORT_MAX:
@@ -823,7 +966,7 @@ def _on_save_downloads(values: dict[str, Any]) -> dict[str, Any]:
 
         try:
             timeout_seconds = int(effective.get("EMAIL_SMTP_TIMEOUT_SECONDS", 60))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return {
                 "error": True,
                 "message": "SMTP timeout (seconds) must be a number",
@@ -848,7 +991,7 @@ def _on_save_downloads(values: dict[str, Any]) -> dict[str, Any]:
 
         try:
             attachment_limit_mb = int(effective.get("EMAIL_ATTACHMENT_SIZE_LIMIT_MB", 25))
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return {
                 "error": True,
                 "message": "Attachment size limit (MB) must be a number",
@@ -1019,12 +1162,30 @@ def download_settings() -> list[SettingsField]:
                 "value": "folder",
             },
         ),
+        TextField(
+            key="NAMING_WORD_SEPARATOR",
+            label="Word Separator",
+            description=(
+                "Replaces spaces inside naming template values (e.g. 'Conan Doyle' -> "
+                "'Conan.Doyle' with '.'). Applies to books and audiobooks, rename and "
+                "organize templates alike. Literal characters typed into a template "
+                "(like the '-' in '{Author} - {Title}') are left as-is. Leave empty to "
+                "keep spaces as-is."
+            ),
+            default="",
+            placeholder=".",
+            max_length=5,
+            show_when={
+                "field": "BOOKS_OUTPUT_MODE",
+                "value": "folder",
+            },
+        ),
         # Rename mode template - filename only
         _naming_template_field(
             key="TEMPLATE_RENAME",
             label="Naming Template",
             description=(
-                "Variables: {Author}, {Title}, {Year}, {Language}, {User}, {OriginalName} "
+                "Variables: {Author}, {FirstAuthor} (first of several authors), {AuthorSort} (first author, surname first), {Title}, {Year}, {Language}, {User}, {OriginalName} "
                 "(source filename without extension). Universal adds: {Series}, "
                 "{SeriesPosition}, {Subtitle}, {PrimaryTitle}. Use arbitrary prefix/suffix: "
                 "{Vol. SeriesPosition - } outputs 'Vol. 2 - ' when set, nothing when empty. "
@@ -1043,7 +1204,7 @@ def download_settings() -> list[SettingsField]:
             key="TEMPLATE_ORGANIZE",
             label="Path Template",
             description=(
-                "Use / to create folders. Variables: {Author}, {Title}, {Year}, {Language}, {User}, "
+                "Use / to create folders. Variables: {Author}, {FirstAuthor} (first of several authors), {AuthorSort} (first author, surname first), {Title}, {Year}, {Language}, {User}, "
                 "{OriginalName} (source filename without extension). Universal adds: {Series}, "
                 "{SeriesPosition}, {Subtitle}, {PrimaryTitle}. Use arbitrary prefix/suffix: "
                 "{Vol. SeriesPosition - } outputs 'Vol. 2 - ' when set, nothing when empty."
@@ -1311,9 +1472,9 @@ def download_settings() -> list[SettingsField]:
             key="TEMPLATE_AUDIOBOOK_RENAME",
             label="Naming Template",
             description=(
-                "Variables: {Author}, {Title}, {Year}, {Language}, {User}, {OriginalName} "
+                "Variables: {Author}, {FirstAuthor} (first of several authors), {AuthorSort} (first author, surname first), {Title}, {Year}, {Language}, {User}, {OriginalName} "
                 "(source filename without extension), {Series}, {SeriesPosition}, {Subtitle}, "
-                "{PrimaryTitle}, {PartNumber}. Use arbitrary prefix/suffix: "
+                "{PrimaryTitle}, {PartNumber}, {Narrator}. Use arbitrary prefix/suffix: "
                 "{Vol. SeriesPosition - } outputs 'Vol. 2 - ' when set, nothing when empty. "
                 "Rename templates are filename-only (no '/' or '\\'); use Organize for folders. "
                 "Applies to single-file downloads."
@@ -1331,10 +1492,13 @@ def download_settings() -> list[SettingsField]:
             key="TEMPLATE_AUDIOBOOK_ORGANIZE",
             label="Path Template",
             description=(
-                "Use / to create folders. Variables: {Author}, {Title}, {Year}, {Language}, {User}, "
+                "Use / to create folders. Variables: {Author}, {FirstAuthor} (first of several authors), {AuthorSort} (first author, surname first), {Title}, {Year}, {Language}, {User}, "
                 "{OriginalName} (source filename without extension), {Series}, {SeriesPosition}, "
-                "{Subtitle}, {PrimaryTitle}, {PartNumber}. Use arbitrary prefix/suffix: "
-                "{Vol. SeriesPosition - } outputs 'Vol. 2 - ' when set, nothing when empty."
+                "{Subtitle}, {PrimaryTitle}, {PartNumber}, {Narrator}. Use arbitrary prefix/suffix: "
+                "{Vol. SeriesPosition - } outputs 'Vol. 2 - ' when set, nothing when empty. "
+                "{Narrator} and a Series fallback come from MyAnonamouse results (needs a MAM "
+                "session ID); {{Narrator}} writes Audiobookshelf's '{Name}' style and is left "
+                "out entirely when there is no narrator."
             ),
             default="{Author}/{Title}/{Title}",
             placeholder="{Author}/{Series/}{Title}{ - Part }{PartNumber}",
@@ -1371,9 +1535,28 @@ def download_settings() -> list[SettingsField]:
         NumberField(
             key="MAX_CONCURRENT_DOWNLOADS",
             label="Max Concurrent Downloads",
-            description="Maximum number of simultaneous downloads.",
+            description=(
+                "Maximum number of simultaneous downloads. Not used while Max Concurrent "
+                "Downloads Per Source is above 0."
+            ),
             default=3,
             min_value=1,
+            max_value=10,
+            requires_restart=True,
+        ),
+        NumberField(
+            key="MAX_CONCURRENT_DOWNLOADS_PER_SOURCE",
+            label="Max Concurrent Downloads Per Source",
+            description=(
+                "Simultaneous downloads allowed from each source (Soulseek, AudiobookBay, "
+                "Direct Download and so on). A source at its limit does not hold the others "
+                "back, so a Soulseek download waiting in a peer's queue cannot stop a torrent "
+                "from starting. Above 0 this replaces Max Concurrent Downloads: the total can "
+                "be this number for every source that has downloads at once. "
+                "0 uses the single limit above for all sources together."
+            ),
+            default=0,
+            min_value=0,
             max_value=10,
             requires_restart=True,
         ),
@@ -1475,6 +1658,13 @@ def _get_slow_source_options() -> list[dict[str, str | bool | None]]:
             "isLocked": _get_reason("zlib") is not None,
             "disabledReason": _get_reason("zlib"),
         },
+        {
+            "id": "oceanofpdf",
+            "label": "OceanofPDF",
+            "description": "Searches and downloads on its own, so its position does not matter",
+            "isLocked": _get_reason("oceanofpdf") is not None,
+            "disabledReason": _get_reason("oceanofpdf"),
+        },
     ]
 
 
@@ -1487,6 +1677,7 @@ def _get_slow_source_defaults() -> list[dict[str, str | bool]]:
         {"id": "aa-slow-wait", "enabled": True},
         {"id": "welib", "enabled": _LEGACY_ALLOW_USE_WELIB},
         {"id": "zlib", "enabled": True},
+        {"id": "oceanofpdf", "enabled": True},
     ]
 
 
@@ -1555,6 +1746,19 @@ def download_source_settings() -> list[SettingsField]:
             default=5,
             min_value=1,
             max_value=60,
+        ),
+        NumberField(
+            key="RELEASE_SEARCH_TIMEOUT",
+            label="Release Search Timeout (seconds)",
+            description=(
+                "How long one release search may run before it gives up and reports why. "
+                "A first search on a cold start pays for a browser solve, so leave room "
+                "for one. If you use a reverse proxy, its read timeout should be at least "
+                "this high or it will cut the search off with a 504 first."
+            ),
+            default=300,
+            min_value=30,
+            max_value=1800,
         ),
         HeadingField(
             key="content_type_routing_heading",
@@ -1667,6 +1871,18 @@ def cloudflare_bypass_settings() -> list[SettingsField]:
             show_when={"field": "USING_EXTERNAL_BYPASSER", "value": True},
         ),
         NumberField(
+            key="BYPASS_PAGE_SOURCE_TIMEOUT",
+            label="Page Read Timeout (seconds)",
+            description=(
+                "How long to wait for a solved page to produce its content before the "
+                "bypass is retried. Raise it if solves succeed but searches still fail."
+            ),
+            default=20,
+            min_value=1,
+            max_value=120,
+            show_when={"field": "USING_EXTERNAL_BYPASSER", "value": False},
+        ),
+        NumberField(
             key="BYPASS_BROWSER_IDLE_TIMEOUT",
             label="Bypasser Idle Timeout (seconds)",
             description=(
@@ -1691,6 +1907,7 @@ def _on_save_mirrors(values: dict[str, Any]) -> dict[str, Any]:
         "LIBGEN_MIRROR_URLS",
         "ZLIB_MIRROR_URLS",
         "WELIB_MIRROR_URLS",
+        "OCEANOFPDF_MIRROR_URLS",
     }
 
     for key in mirror_list_keys:
@@ -1775,6 +1992,17 @@ def mirror_settings() -> list[SettingsField]:
             label="Welib",
             description="Only the first mirror in the list is used.",
             placeholder="https://your-welib-mirror.example",
+        ),
+        # === OCEANOFPDF ===
+        TagListField(
+            key="OCEANOFPDF_MIRROR_URLS",
+            label="OceanofPDF",
+            description=(
+                "Searches and downloads directly, without Anna's Archive. Only the first "
+                "mirror in the list is used. The site is behind Cloudflare, so the bypass "
+                "must be enabled."
+            ),
+            placeholder="https://oceanofpdf.com",
         ),
     ]
 
@@ -1894,6 +2122,7 @@ def advanced_settings() -> list[SettingsField]:
                         {"value": "rtorrent", "label": "rTorrent"},
                         {"value": "nzbget", "label": "NZBGet"},
                         {"value": "sabnzbd", "label": "SABnzbd"},
+                        {"value": "slskd", "label": "slskd"},
                     ],
                     "defaultValue": "qbittorrent",
                 },
@@ -1987,3 +2216,8 @@ def advanced_settings() -> list[SettingsField]:
 
 
 register_on_save("advanced", _on_save_advanced)
+
+
+# Register the Hardcover Sync settings tab. Imported here (rather than at each
+# settings endpoint) so every code path that imports this module also registers it.
+from shelfmark.config import hardcover_sync_settings as _hardcover_sync_settings  # noqa: E402,F401

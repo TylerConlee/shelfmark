@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from shelfmark.metadata_providers import get_provider_capabilities
 
 

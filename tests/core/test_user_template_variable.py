@@ -1,5 +1,7 @@
 """Tests for {User} template variable in folder destination paths."""
 
+from __future__ import annotations
+
 from shelfmark.core.naming import KNOWN_TOKENS, parse_naming_template
 
 

@@ -4,6 +4,8 @@ These utilities handle file collisions atomically, avoiding TOCTOU race conditio
 when multiple workers may try to write to the same path simultaneously.
 """
 
+from __future__ import annotations
+
 import contextlib
 import errno
 import os

@@ -7,6 +7,8 @@ a FLAC audiobook that was invisible in search and rejected after download. They 
 derive from `shelfmark.core.utils.AUDIOBOOK_FORMATS`; this test fails if one drifts again.
 """
 
+from __future__ import annotations
+
 from shelfmark.config.settings import _AUDIOBOOK_FORMAT_OPTIONS
 from shelfmark.core.utils import ARCHIVE_FORMATS, AUDIOBOOK_FORMATS
 from shelfmark.download.archive import ALL_AUDIO_EXTENSIONS

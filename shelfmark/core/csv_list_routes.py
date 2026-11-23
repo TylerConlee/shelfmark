@@ -96,7 +96,7 @@ def register_csv_list_routes(
             return jsonify({"error": "CSV queue processing is unavailable"}), 503
         try:
             load_csv_list(list_id)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             return jsonify({"error": "CSV list not found"}), 404
 
         started = queue_all(

@@ -3,16 +3,20 @@
 Searches IRC channels for ebook and audiobook releases.
 """
 
+from __future__ import annotations
+
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, NoReturn
 
 if TYPE_CHECKING:
     from shelfmark.core.search_plan import ReleaseSearchPlan
     from shelfmark.metadata_providers import BookMetadata
 
 from shelfmark.api.websocket import ws_manager
+from shelfmark.core import search_deadline
+from shelfmark.core.author_match import author_affinity, search_surname
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.utils import is_audiobook
@@ -27,9 +31,11 @@ from shelfmark.release_sources import (
     ReleaseProtocol,
     ReleaseSource,
     SourceActionButton,
+    SourceUnavailableError,
     register_source,
 )
 
+from .client import IRCError, bare_channel_name, has_control_characters
 from .connection_manager import connection_manager
 from .dcc import DCCError, download_dcc, safe_dcc_filename
 from .parser import SearchResult, extract_results_from_zip, parse_results_file
@@ -43,6 +49,11 @@ def _config_text(key: str) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _config_channel(key: str) -> str:
+    """Read a channel setting as the bare name, so "#ebooks" and "ebooks" are one channel."""
+    return bare_channel_name(_config_text(key))
 
 
 def _config_port(key: str, default: int) -> int:
@@ -85,6 +96,18 @@ def _emit_status(message: str, phase: str = "searching") -> None:
     )
 
 
+def _reported_author(release: Release) -> str:
+    """The author a result actually claims, with the parser's sentinel read as none.
+
+    A filename with no " - " separator has no author to report and parser.py:168
+    fills in "Unknown". Ranked literally that sorts as a wrong author, below every
+    result that named someone else; as absent it sorts between agreement and
+    disagreement, which is what the tier was built for.
+    """
+    author = release.extra.get("author", "")
+    return "" if author == "Unknown" else author
+
+
 # Rate limiting to avoid server throttling
 MIN_SEARCH_INTERVAL = 15.0
 _last_search_time: float = 0
@@ -99,6 +122,36 @@ MAX_IDENTICAL_SENDS = 3
 IDENTICAL_SEND_WINDOW_SECONDS = 24 * 60 * 60  # 24 hours
 # message-send-key -> timestamps of recent posts of that exact message
 _recent_message_sends: dict[str, list[float]] = {}
+
+
+def _raise_connection_dropped() -> NoReturn:
+    msg = "IRC connection dropped during the search"
+    raise SourceUnavailableError(msg)
+
+
+def _deadline_left() -> float | None:
+    """Seconds the search deadline has left, or None outside a search."""
+    deadline = search_deadline.current()
+    return deadline.remaining if deadline else None
+
+
+def _raise_out_of_time() -> NoReturn:
+    msg = "The IRC search ran out of time; try again shortly"
+    raise SourceUnavailableError(msg)
+
+
+def _within_deadline(seconds: float) -> float:
+    """``seconds``, cut to what the search deadline has left. Raises once it is spent.
+
+    The API waits on the search, so a phase that outlives the deadline turns into a
+    gateway timeout for the user.
+    """
+    left = _deadline_left()
+    if left is None:
+        return seconds
+    if left < 1.0:  # too little left to start another phase
+        _raise_out_of_time()
+    return min(seconds, left)
 
 
 def _enforce_rate_limit() -> None:
@@ -165,7 +218,7 @@ class IRCReleaseSource(ReleaseSource):
         to the channel, which reads as spam and gets the nick banned.
         """
         server = _config_text("IRC_SERVER")
-        channel = _config_text("IRC_CHANNEL")
+        channel = _config_channel("IRC_CHANNEL")
         nick = _config_text("IRC_NICK")
         search_bot = _config_text("IRC_SEARCH_BOT")
         return bool(server and channel and nick and search_bot)
@@ -226,17 +279,24 @@ class IRCReleaseSource(ReleaseSource):
             logger.debug("IRC source is disabled, skipping search")
             return []
 
-        # Build search query
-        query = plan.primary_query or self._build_query(book)
+        query = self._build_query(book, plan)
         if not query:
             logger.warning("No search query could be built")
             return []
+
+        if has_control_characters(query):
+            logger.warning("IRC search refused: query contains control characters")
+            return []
+
+        # A manual query is the user's own words; ranking it against the metadata
+        # author would second-guess what they typed.
+        wanted_author = "" if plan.manual_query else plan.author
 
         # Get IRC settings
         server = _config_text("IRC_SERVER")
         port = _config_port("IRC_PORT", 6697)
         use_tls = _config_bool("IRC_USE_TLS", True)
-        channel = _config_text("IRC_CHANNEL")
+        channel = _config_channel("IRC_CHANNEL")
         nick = _config_text("IRC_NICK")
         search_bot = _config_text("IRC_SEARCH_BOT")
 
@@ -246,7 +306,7 @@ class IRCReleaseSource(ReleaseSource):
         # fall back to the main channel/bot — that is the common case, since most networks
         # (irchighway included) serve both formats from the one channel.
         if is_audiobook(content_type):
-            audiobook_channel = _config_text("IRC_AUDIOBOOK_CHANNEL")
+            audiobook_channel = _config_channel("IRC_AUDIOBOOK_CHANNEL")
             if audiobook_channel:
                 channel = audiobook_channel
                 audiobook_search_bot = _config_text("IRC_AUDIOBOOK_SEARCH_BOT")
@@ -276,33 +336,51 @@ class IRCReleaseSource(ReleaseSource):
             if cached:
                 _emit_status("Using cached results", phase="complete")
                 self._online_servers = set(cached.get("online_servers", []))
-                return self._filter_by_content_type(cached["releases"], requested)
-
-        # Anti-spam cap: the exact same query may only be POSTED a limited number of times
-        # per window, even via refresh. Beyond that, serve whatever is cached rather than
-        # re-posting the identical message to the channel.
-        if _recent_send_count(query_key) >= MAX_IDENTICAL_SENDS:
-            logger.info(
-                "IRC query hit %s-send limit in window, not re-posting: %s",
-                MAX_IDENTICAL_SENDS,
-                query,
-            )
-            _emit_status(
-                "Search limit reached for this query — showing latest results", phase="complete"
-            )
-            cached = get_cached_results(query_key)
-            if cached:
-                self._online_servers = set(cached.get("online_servers", []))
-                return self._filter_by_content_type(cached["releases"], requested)
-            return []
-
-        logger.info("IRC search: %s", query)
-
-        # Enforce rate limit
-        _enforce_rate_limit()
+                return self._rank_by_author(
+                    self._filter_by_content_type(cached["releases"], requested), wanted_author
+                )
 
         client = None
+        if not connection_manager.io_lock.acquire(blocking=False):
+            _emit_status("Waiting for the IRC connection...", phase="searching")
+            deadline = search_deadline.current()
+            timeout = deadline.remaining if deadline else 180.0
+            if not connection_manager.io_lock.acquire(timeout=timeout):
+                msg = "IRC is busy, try again shortly"
+                raise SourceUnavailableError(msg)
         try:
+            # An identical search queued ahead of us may have just cached the answer.
+            if not expand_search:
+                cached = get_cached_results(query_key)
+                if cached:
+                    _emit_status("Using cached results", phase="complete")
+                    self._online_servers = set(cached.get("online_servers", []))
+                    return self._rank_by_author(
+                        self._filter_by_content_type(cached["releases"], requested), wanted_author
+                    )
+
+            # Anti-spam cap: the exact same query may only be POSTED a limited number of times
+            # per window, even via refresh. Beyond that, serve whatever is cached rather than
+            # re-posting the identical message to the channel.
+            if _recent_send_count(query_key) >= MAX_IDENTICAL_SENDS:
+                logger.info(
+                    "IRC query hit %s-send limit in window, not re-posting: %s",
+                    MAX_IDENTICAL_SENDS,
+                    query,
+                )
+                _emit_status(
+                    "Search limit reached for this query — showing latest results", phase="complete"
+                )
+                cached = get_cached_results(query_key)
+                if cached:
+                    self._online_servers = set(cached.get("online_servers", []))
+                    return self._rank_by_author(
+                        self._filter_by_content_type(cached["releases"], requested), wanted_author
+                    )
+                return []
+
+            logger.info("IRC search: %s", query)
+
             # Get or reuse IRC connection
             _emit_status(f"Connecting to {server}...", phase="connecting")
             client = connection_manager.get_connection(
@@ -316,6 +394,10 @@ class IRCReleaseSource(ReleaseSource):
             # Capture online servers (elevated users in channel)
             self._online_servers = client.online_servers
 
+            # Space real sends, not lock-queue entries (the lock may have been held a while).
+            _enforce_rate_limit()
+            wait_timeout = _within_deadline(60.0)  # nothing is sent once the time is spent
+
             # Send search request (always addressed to the search bot, never bare)
             client.send_message(f"#{channel}", f"@{search_bot} {query}")
             _record_message_sent(query_key)
@@ -325,9 +407,25 @@ class IRCReleaseSource(ReleaseSource):
             # "@search" from a differently-named results bot. The DCC endpoint/filename are
             # still validated, and wait_for_dcc falls back to the channel's server list.
             _emit_status(f"Connected to #{channel} - Waiting for results...", phase="searching")
-            offer = client.wait_for_dcc(timeout=60.0, result_type=True)
+            offer = client.wait_for_dcc(
+                timeout=wait_timeout, result_type=True, expected_query=query
+            )
 
             online_servers = list(self._online_servers) if self._online_servers else None
+
+            if not offer and not client.is_connected:
+                # The server dropped the link mid-search. That says nothing about the
+                # book, so it is neither cached as "no results" nor counted as one; the
+                # request is searched again on the next pass.
+                connection_manager.close_connection(client)
+                _raise_connection_dropped()
+
+            if not offer and wait_timeout < 60.0 and client.last_wait_timed_out:
+                # The deadline cut the wait short and the bot may still answer, so this is
+                # not "no results". The client marks the query timed out, so a late answer
+                # is skipped by the next search.
+                connection_manager.release_connection(client)
+                _raise_out_of_time()
 
             if not offer:
                 logger.info("No search results received")
@@ -343,7 +441,7 @@ class IRCReleaseSource(ReleaseSource):
             _emit_status(f"Connected to #{channel} - Downloading results...", phase="downloading")
             with tempfile.TemporaryDirectory() as tmpdir:
                 result_path = Path(tmpdir) / safe_dcc_filename(offer.filename)
-                download_dcc(offer, result_path, timeout=30.0)
+                download_dcc(offer, result_path, timeout=_within_deadline(30.0))
 
                 # Parse results
                 if result_path.suffix.lower() == ".zip":
@@ -369,14 +467,29 @@ class IRCReleaseSource(ReleaseSource):
                 ebook_releases + audiobook_releases,
                 online_servers=online_servers,
             )
-            releases = audiobook_releases if requested == "audiobook" else ebook_releases
+            # Ranked on the way out, never before the cache: one query identity is
+            # shared by every book that produced the same query, so the order has to
+            # follow the author asked for now, not the one that filled the cache.
+            releases = self._rank_by_author(
+                audiobook_releases if requested == "audiobook" else ebook_releases, wanted_author
+            )
 
-        except DCCError as e:
-            logger.exception("DCC error during search")
-            _emit_status(f"DCC error: {e}", phase="error")
+        except SourceUnavailableError:
+            raise
+        except (IRCError, OSError) as e:
+            logger.warning("IRC search failed: %s", e)
             if client:
                 connection_manager.close_connection(client)
-            return []
+            msg = f"IRC search unavailable: {e}"
+            raise SourceUnavailableError(msg) from e
+        except DCCError as e:
+            # The results transfer failed, which says nothing about the book. The DCC
+            # socket failed, not the IRC one, so the connection is handed back.
+            logger.warning("DCC error during search: %s", e)
+            if client:
+                connection_manager.release_connection(client)
+            msg = f"IRC results transfer failed: {e}"
+            raise SourceUnavailableError(msg) from e
         except Exception as e:
             logger.exception("IRC search failed")
             _emit_status(f"Search failed: {e}", phase="error")
@@ -387,21 +500,50 @@ class IRCReleaseSource(ReleaseSource):
         else:
             return releases
 
-    def _build_query(self, book: BookMetadata) -> str:
-        """Build search query from book metadata."""
-        parts = []
+        finally:
+            connection_manager.io_lock.release()
 
-        if book.search_title or book.title:
-            parts.append(book.search_title or book.title)
+    def _build_query(self, book: BookMetadata, plan: ReleaseSearchPlan) -> str:
+        """Build the line posted to the channel: a title, plus a surname.
 
-        if book.search_author:
-            parts.append(book.search_author)
-        elif book.authors:
-            # Use first author
-            author = book.authors[0] if isinstance(book.authors, list) else book.authors
-            parts.append(author)
+        Both come off the variant rather than the plan: an ISBN fallback variant
+        carries `author=""` on purpose (search_plan.py:246), and so does a manual
+        query, so reading `plan.author` here would append a surname to searches
+        that deliberately have none.
 
+        Returns "" without a title, so the caller reports "no query" rather than
+        posting one. A surname on its own is not a search: `@search Petrie` asks
+        the bot for every Petrie on the channel, and a bare over-broad line is the
+        kind of post `is_available` refuses queries to avoid being banned for.
+        """
+        variant = plan.title_variants[0] if plan.title_variants else None
+        title = variant.title if variant else (book.search_title or book.title)
+        if not title:
+            return ""
+        author = variant.author if variant else plan.author
+        parts = [part for part in (title, search_surname(author)) if part]
         return " ".join(parts)
+
+    def _rank_by_author(self, releases: list[Release], wanted_author: str) -> list[Release]:
+        """Order releases by author agreement, under the server's availability.
+
+        A surname is a weak filter - it also matches a different author who shares
+        it - so the full name decides the order while the search bot decides the
+        set. Availability stays the outer key: downloading asks one named bot and
+        waits 120s for it (handler.py:133-139), so a release from a bot that is not
+        in the channel must not outrank one that can actually answer. Sorting is
+        stable, so format and server order survive inside each tier.
+        """
+        if not wanted_author:
+            return releases
+        online = self._online_servers or set()
+        return sorted(
+            releases,
+            key=lambda release: (
+                0 if release.extra.get("server", "") in online else 1,
+                author_affinity(wanted_author, _reported_author(release)),
+            ),
+        )
 
     # Format priority for sorting (lower = higher priority)
     EBOOK_FORMAT_PRIORITY: ClassVar[dict[str, int]] = {
@@ -428,14 +570,15 @@ class IRCReleaseSource(ReleaseSource):
         "m4b": 0,
         "mp3": 1,
         "m4a": 2,
-        "flac": 3,
-        "opus": 4,
-        "ogg": 5,
-        "aac": 6,
-        "wav": 7,
-        "wma": 8,
-        "rar": 9,
-        "zip": 10,
+        "mp4": 3,
+        "flac": 4,
+        "opus": 5,
+        "ogg": 6,
+        "aac": 7,
+        "wav": 8,
+        "wma": 9,
+        "rar": 10,
+        "zip": 11,
     }
 
     def _convert_to_releases(

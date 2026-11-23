@@ -6,6 +6,8 @@ Tests the full application flow through the HTTP API.
 Run with: uv run pytest tests/e2e/ -v -m e2e
 """
 
+from __future__ import annotations
+
 import pytest
 
 from .conftest import (

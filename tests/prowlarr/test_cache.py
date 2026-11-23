@@ -2,6 +2,8 @@
 Tests for the Prowlarr release cache.
 """
 
+from __future__ import annotations
+
 import time
 
 # Import the cache module

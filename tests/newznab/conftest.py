@@ -6,6 +6,8 @@ in lightweight dev/CI environments. These are only needed by the IRC source,
 which is unrelated to the newznab plugin under test.
 """
 
+from __future__ import annotations
+
 import sys
 import types
 

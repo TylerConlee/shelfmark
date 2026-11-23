@@ -1,5 +1,7 @@
 """Unit tests for the Newznab API client."""
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -206,3 +208,21 @@ class TestSearch:
             client.search(query="book", search_type="book")
 
         assert captured[0]["t"] == "book"
+
+
+class TestRequestLogging:
+    def test_debug_line_formats_and_leaves_the_api_key_out(self):
+        client = NewznabClient("http://nzbhydra:5076", "s3cret")
+        response = MagicMock(status_code=200, text=CAPS_XML, content=CAPS_XML.encode())
+        response.raise_for_status = MagicMock()
+
+        with (
+            patch.object(client._session, "get", return_value=response),
+            patch("shelfmark.release_sources.newznab.api.logger") as log,
+        ):
+            client._get({"t": "caps"})
+
+        fmt, *args = log.debug.call_args.args
+        line = fmt % tuple(args)
+        assert "'apikey'" in line
+        assert "s3cret" not in line

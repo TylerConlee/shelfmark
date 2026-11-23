@@ -7,6 +7,8 @@ configuration settings, environment variables, and Docker setups.
 Run with: uv run pytest tests/config/test_environment.py -v
 """
 
+from __future__ import annotations
+
 import importlib
 import json
 import os

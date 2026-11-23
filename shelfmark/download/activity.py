@@ -35,13 +35,35 @@ uploads, and the Anna's Archive countdown in `release_sources.direct_download` (
 refreshes the stall clock on every tick of a loop that proves nothing about the remote).
 """
 
+from __future__ import annotations
+
+import re
 from collections.abc import Callable
+
+# Seconds without a changed status or progress value before the orchestrator cancels a
+# download. Lives here so the settings module can derive its minimum without importing the
+# orchestrator.
+STALL_TIMEOUT_SECONDS = 300
 
 # Not a QueueStatus value, so `update_download_status` would reject it anyway; the
 # orchestrator's status_callback intercepts it before that point.
 ACTIVITY_GRACE_STATUS = "__activity_grace__"
 
 StatusCallback = Callable[[str, str | None], None]
+
+# The note a torrent handler appends to its progress message: " · 2 seeds", or
+# " · 0 seeds, giving up in 7m". It follows the swarm and counts down on a timer, and neither
+# is progress, so a change in it alone must not refresh the stall clock. The handler builds
+# it in `ExternalClientHandler._seed_note`; a test keeps the two in step.
+_SEED_NOTE_SUFFIX = re.compile(r" · \d+ seeds?(?:, giving up in \d+m)?$")
+
+
+def activity_key(message: str | None) -> str | None:
+    """The part of a status message whose change counts as activity."""
+    if message is None:
+        return None
+    return _SEED_NOTE_SUFFIX.sub("", message)
+
 
 # A status_callback is caller-supplied and may raise; a failed liveness hint must never
 # break the operation it was protecting. Mirrors http._STATUS_CALLBACK_ERRORS.
@@ -68,7 +90,7 @@ def parse_activity_grace(status: str, message: str | None) -> float | None:
         return None
     try:
         return max(float(message or 0), 0.0)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 0.0
 
 

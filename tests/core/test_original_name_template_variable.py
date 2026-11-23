@@ -1,5 +1,7 @@
 """Tests for {OriginalName} template variable support."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from shelfmark.core.models import DownloadTask

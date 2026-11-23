@@ -3,6 +3,8 @@
 Uses NZBGet's JSON-RPC API directly via requests (no external dependency).
 """
 
+from __future__ import annotations
+
 import json
 from typing import Any, NoReturn
 

@@ -27,6 +27,24 @@ export const normalizeLanguageSelection = (selected: string[]): string[] => {
   return unique.length ? unique : [LANGUAGE_OPTION_DEFAULT];
 };
 
+/**
+ * Resolve the language codes the "Default" filter option stands for.
+ *
+ * An explicitly empty list is a deliberate "no default filter" and is returned as-is;
+ * only a missing value falls back to the first supported language. Substituting a
+ * language for the empty list would make the UI filter by a language the backend
+ * does not apply.
+ */
+export const resolveDefaultLanguageCodes = (
+  configuredDefault: string[] | null | undefined,
+  supportedLanguages: Language[],
+): string[] => {
+  if (Array.isArray(configuredDefault)) {
+    return configuredDefault;
+  }
+  return [supportedLanguages[0]?.code || 'en'];
+};
+
 export const getLanguageFilterValues = (
   selection: string[],
   supportedLanguages: Language[],
@@ -105,7 +123,7 @@ export const buildLanguageNormalizer = (languages: Language[]): Map<string, stri
  * (e.g., "English, Spanish", "English/Spanish", "English + Spanish", "English & Spanish").
  *
  * @param releaseLang - Language string from the release (can be code or full name)
- * @param selectedCodes - Array of selected ISO language codes
+ * @param selectedCodes - Array of selected ISO language codes; null or empty means no filter
  * @param languageNormalizer - Optional map to normalize language names to codes
  */
 export const releaseLanguageMatchesFilter = (
@@ -113,7 +131,9 @@ export const releaseLanguageMatchesFilter = (
   selectedCodes: string[] | null,
   languageNormalizer?: Map<string, string>,
 ): boolean => {
-  if (!releaseLang || !selectedCodes) {
+  // An empty list is an explicitly empty BOOK_LANGUAGE ("no default filter"), which the
+  // backend does not filter on either; treating it as "match nothing" hid every release.
+  if (!releaseLang || !selectedCodes || selectedCodes.length === 0) {
     return true;
   }
   if (selectedCodes.includes(LANGUAGE_OPTION_ALL)) {

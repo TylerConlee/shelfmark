@@ -6,6 +6,8 @@ These tests verify the end-to-end download flow through the Prowlarr handler.
 Run with: docker compose -f docker-compose.test-clients.yml exec shelfmark uv run pytest /app/tests/prowlarr/test_integration_handler.py -v -m integration
 """
 
+from __future__ import annotations
+
 import time
 from threading import Event
 

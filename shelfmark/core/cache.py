@@ -1,5 +1,7 @@
 """Thread-safe in-memory cache with TTL support."""
 
+from __future__ import annotations
+
 import threading
 import time
 from dataclasses import dataclass

@@ -1,5 +1,7 @@
 """Tests for handing a 503 that carries a browser challenge to the bypasser."""
 
+from __future__ import annotations
+
 import requests
 
 _CHALLENGE_HTML = (

@@ -8,6 +8,8 @@ Output handlers live in `shelfmark.download.outputs` and should depend on
 `pipeline` (not `router`) to avoid circular imports.
 """
 
+from __future__ import annotations
+
 from .router import post_process_download
 
 __all__ = ["post_process_download"]

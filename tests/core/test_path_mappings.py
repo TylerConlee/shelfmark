@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from shelfmark.core.path_mappings import (
     RemotePathMapping,
     remap_remote_to_local_with_match,

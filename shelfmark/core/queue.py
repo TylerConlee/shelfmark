@@ -1,5 +1,7 @@
 """Thread-safe download queue manager with priority support and cancellation."""
 
+from __future__ import annotations
+
 import queue
 import time
 from datetime import UTC, datetime, timedelta
@@ -78,6 +80,7 @@ class BookQueue:
             # Ensure added_time is set
             if task.added_time == 0:
                 task.added_time = time.time()
+            task.finished_at = None
 
             queue_item = QueueItem(task_id, task.priority, task.added_time)
             self._queue.put(queue_item)
@@ -92,12 +95,23 @@ class BookQueue:
                 logger.warning("Queue hook failed while adding task %s: %s", task_id, exc)
         return True
 
-    def get_next(self) -> tuple[str, Event] | None:
-        """Get next task ID from queue with cancellation flag."""
-        # Use iterative approach to avoid stack overflow if many items are cancelled
-        while True:
-            try:
-                queue_item = self._queue.get_nowait()
+    def get_next(
+        self, accept: Callable[[DownloadTask], bool] | None = None
+    ) -> tuple[str, Event] | None:
+        """Get next task ID from queue with cancellation flag.
+
+        ``accept`` lets the caller pass over tasks it cannot start yet (their source is at its
+        limit). A task passed over keeps its place: it goes back with the same priority and
+        arrival time, so it is first in line once there is room.
+        """
+        passed_over: list[QueueItem] = []
+        try:
+            # Use iterative approach to avoid stack overflow if many items are cancelled
+            while True:
+                try:
+                    queue_item = self._queue.get_nowait()
+                except queue.Empty:
+                    return None
                 task_id = queue_item.book_id  # QueueItem uses book_id as the ID field
 
                 with self._lock:
@@ -105,14 +119,19 @@ class BookQueue:
                     if task_id in self._status and self._status[task_id] == QueueStatus.CANCELLED:
                         continue  # Skip cancelled items, try next
 
+                    task = self._task_data.get(task_id)
+                    if accept is not None and task is not None and not accept(task):
+                        passed_over.append(queue_item)
+                        continue
+
                     # Create cancellation flag for this download
                     cancel_flag = Event()
                     self._cancel_flags[task_id] = cancel_flag
                     self._active_downloads[task_id] = True
-            except queue.Empty:
-                return None
-            else:
                 return task_id, cancel_flag
+        finally:
+            for item in passed_over:
+                self._queue.put(item)
 
     def get_task(self, task_id: str) -> DownloadTask | None:
         """Get a task by its ID."""
@@ -145,28 +164,44 @@ class BookQueue:
         with self._lock:
             self._queue_hook = hook
 
-    def update_status(self, book_id: str, status: QueueStatus) -> None:
-        """Update status of a book in the queue."""
+    def _apply_status_locked(
+        self, book_id: str, status: QueueStatus
+    ) -> tuple[Callable[[str, QueueStatus, DownloadTask], None] | None, DownloadTask | None]:
+        """Apply a status change; returns the terminal hook to run after releasing the lock."""
         hook: Callable[[str, QueueStatus, DownloadTask], None] | None = None
         hook_task: DownloadTask | None = None
-        with self._lock:
-            previous_status = self._status.get(book_id)
-            self._update_status(book_id, status)
+        previous_status = self._status.get(book_id)
+        if previous_status in TERMINAL_QUEUE_STATUSES and previous_status != status:
+            # The first terminal status wins. A worker that checked its cancel flag just before
+            # a cancel landed would otherwise overwrite CANCELLED with COMPLETE and fire the
+            # terminal hook a second time. A late progress update (DOWNLOADING) is refused for
+            # the same reason: it would reopen the task and let the next terminal status
+            # through. A retry goes through add() or enqueue_existing(), which reset the
+            # status themselves.
+            return None, None
+        self._update_status(book_id, status)
 
-            if (
-                status in TERMINAL_QUEUE_STATUSES
-                and previous_status != status
-                and self._terminal_status_hook is not None
-            ):
-                current_task = self._task_data.get(book_id)
-                if current_task is not None:
+        if status in TERMINAL_QUEUE_STATUSES and previous_status != status:
+            current_task = self._task_data.get(book_id)
+            if current_task is not None:
+                # Stamped before the hook runs, so a snapshot taken while history is still
+                # being finalized already knows when the download ended.
+                current_task.finished_at = time.time()
+                if self._terminal_status_hook is not None:
                     hook = self._terminal_status_hook
                     hook_task = current_task
 
-            # Clean up active download tracking when finished
-            if status in TERMINAL_QUEUE_STATUSES:
-                self._active_downloads.pop(book_id, None)
-                self._cancel_flags.pop(book_id, None)
+        # Clean up active download tracking when finished
+        if status in TERMINAL_QUEUE_STATUSES:
+            self._active_downloads.pop(book_id, None)
+            self._cancel_flags.pop(book_id, None)
+
+        return hook, hook_task
+
+    def update_status(self, book_id: str, status: QueueStatus) -> None:
+        """Update status of a book in the queue."""
+        with self._lock:
+            hook, hook_task = self._apply_status_locked(book_id, status)
 
         if hook is not None and hook_task is not None:
             hook(book_id, status, hook_task)
@@ -257,7 +292,11 @@ class BookQueue:
                 # Not in a cancellable state
                 return False
 
-        self.update_status(task_id, QueueStatus.CANCELLED)
+            # Write under the same lock so a download that finishes first is not overwritten
+            hook, hook_task = self._apply_status_locked(task_id, QueueStatus.CANCELLED)
+
+        if hook is not None and hook_task is not None:
+            hook(task_id, QueueStatus.CANCELLED, hook_task)
         return True
 
     def set_priority(self, task_id: str, new_priority: int) -> bool:
@@ -303,6 +342,7 @@ class BookQueue:
 
             if priority is not None:
                 task.priority = priority
+            task.finished_at = None
 
             # Ensure task doesn't appear active while waiting for retry.
             self._active_downloads.pop(task_id, None)

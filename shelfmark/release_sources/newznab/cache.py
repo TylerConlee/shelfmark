@@ -4,6 +4,8 @@ Newznab release cache.
 Stores search results so the handler can look up releases by source_id.
 """
 
+from __future__ import annotations
+
 import time
 from threading import Lock
 

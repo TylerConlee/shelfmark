@@ -3,6 +3,8 @@
 Handles downloading IRC releases via DCC protocol.
 """
 
+from __future__ import annotations
+
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,6 +13,7 @@ from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
 from shelfmark.release_sources import DownloadHandler, register_handler
 
+from .client import bare_channel_name, has_control_characters
 from .connection_manager import connection_manager
 from .dcc import DCCError, download_dcc, safe_dcc_filename
 
@@ -81,13 +84,17 @@ class IRCDownloadHandler(DownloadHandler):
         """Download a release via IRC DCC. task.task_id contains the IRC request string."""
         download_request = task.task_id
         logger.info("IRC download: %s...", download_request[:60])
+        if has_control_characters(download_request):
+            logger.warning("IRC download refused: request line contains control characters")
+            status_callback("error", "Invalid IRC request: contains control characters")
+            return None
         expected_server = _server_from_download_request(download_request)
 
         # Get IRC settings
         server = _config_text("IRC_SERVER")
         port = _config_port("IRC_PORT", 6697)
         use_tls = _config_bool("IRC_USE_TLS", True)
-        channel = _config_text("IRC_CHANNEL")
+        channel = bare_channel_name(_config_text("IRC_CHANNEL"))
         nick = _config_text("IRC_NICK")
 
         if not server or not channel or not nick:
@@ -106,6 +113,8 @@ class IRCDownloadHandler(DownloadHandler):
             status_callback("cancelled", "Cancelled")
             return True
 
+        lock_held = True
+        connection_manager.io_lock.acquire()
         try:
             # Phase 1: Get or reuse IRC connection
             status_callback("resolving", f"Connecting to {server}")
@@ -133,15 +142,24 @@ class IRCDownloadHandler(DownloadHandler):
             # Phase 3: Wait for DCC offer
             status_callback("resolving", "Waiting for bot response")
 
-            wait_kwargs = {"expected_senders": {expected_server}} if expected_server else {}
-            offer = client.wait_for_dcc(timeout=120.0, result_type=False, **wait_kwargs)
+            offer = client.wait_for_dcc(
+                timeout=120.0,
+                result_type=False,
+                expected_senders={expected_server} if expected_server else None,
+            )
 
             if not offer:
                 status_callback("error", "No response from bot")
                 connection_manager.release_connection(client)
                 return None
 
-            if check_cancelled():
+            # The transfer runs on its own DCC socket, so the IRC connection is free again.
+            connection_manager.release_connection(client)
+            connection_manager.io_lock.release()
+            lock_held = False
+
+            if cancel_flag.is_set():
+                status_callback("cancelled", "Cancelled")
                 return None
 
             # Phase 4: Download via DCC
@@ -165,9 +183,6 @@ class IRCDownloadHandler(DownloadHandler):
                 timeout=60.0,
             )
 
-            # Release connection for reuse (don't close it)
-            connection_manager.release_connection(client)
-
             if cancel_flag.is_set():
                 # Clean up partial download
                 staging_path.unlink(missing_ok=True)
@@ -178,18 +193,22 @@ class IRCDownloadHandler(DownloadHandler):
             return str(staging_path)
 
         except DCCError as e:
+            # The DCC socket failed, not the IRC one.
             logger.exception("DCC error")
             status_callback("error", str(e))
-            if client:
-                connection_manager.close_connection(client)
             return None
 
         except Exception as e:
             logger.exception("Download failed")
             status_callback("error", f"Download failed: {e}")
-            if client:
+            # Only drop a connection we still own; after the offer it was already released.
+            if client and lock_held:
                 connection_manager.close_connection(client)
             return None
+
+        finally:
+            if lock_held:
+                connection_manager.io_lock.release()
 
     def cancel(self, task_id: str) -> bool:
         """Cancel an in-progress download (cleanup if cancel_flag fails)."""
