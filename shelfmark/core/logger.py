@@ -6,11 +6,14 @@ import logging
 import sys
 from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 from threading import Lock
+from typing import TYPE_CHECKING
 
 from shelfmark.config.env import ENABLE_LOGGING, LOG_FILE, LOG_LEVEL
 from shelfmark.core.redaction import redact_secrets
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _file_handlers: dict[Path, RotatingFileHandler] = {}
 _file_handlers_lock = Lock()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 def test_aa_base_url_options_include_configured_custom_url(monkeypatch):
     import shelfmark.config.settings as settings
     from shelfmark.core.config import config as config_obj

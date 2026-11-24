@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 def test_update_settings_network_logs_dns_apply_failure(monkeypatch):
     import shelfmark.config.settings  # noqa: F401
     import shelfmark.core.settings_registry as registry
