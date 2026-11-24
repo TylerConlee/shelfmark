@@ -19,6 +19,7 @@ import requests
 from shelfmark.config.env import TMP_DIR
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
+from shelfmark.core.redaction import safe_url
 from shelfmark.download.clients import (
     DownloadClient,
     DownloadState,
@@ -37,6 +38,11 @@ from shelfmark.download.network import get_ssl_verify
 logger = setup_logger(__name__)
 
 _API_BASE = "https://api.alldebrid.com/v4"
+
+# One session for every client instance, so the status poll every couple of seconds
+# reuses a keep-alive connection instead of opening a new TLS connection each time.
+_session = requests.Session()
+
 _AGENT = "shelfmark"
 
 _ALLDEBRID_CLIENT_ERRORS = (
@@ -76,6 +82,7 @@ _BOOK_EXTENSIONS = (
     ".m4b",
     ".mobi",
     ".mp3",
+    ".mp4",
     ".ogg",
     ".opus",
     ".pdf",
@@ -176,7 +183,7 @@ class AllDebridClient(DownloadClient):
             return False, "AllDebrid API Key is required"
         try:
             url = f"{_API_BASE}/user"
-            resp = requests.get(
+            resp = _session.get(
                 url,
                 headers=self._auth_headers(),
                 timeout=_STATUS_TIMEOUT,
@@ -260,7 +267,7 @@ class AllDebridClient(DownloadClient):
         if isinstance(upload, DebridMagnet):
             api_url = f"{_API_BASE}/magnet/upload"
             entries_key = "magnets"
-            resp = requests.post(
+            resp = _session.post(
                 api_url,
                 headers=self._auth_headers(),
                 data={"magnets[]": upload.magnet_url},
@@ -270,7 +277,7 @@ class AllDebridClient(DownloadClient):
         else:
             api_url = f"{_API_BASE}/magnet/upload/file"
             entries_key = "files"
-            resp = requests.post(
+            resp = _session.post(
                 api_url,
                 headers=self._auth_headers(),
                 files={
@@ -334,7 +341,7 @@ class AllDebridClient(DownloadClient):
         # Ask AllDebrid for the current magnet status.
         try:
             status_url = f"{_API_BASE.replace('/v4', '/v4.1')}/magnet/status"
-            resp = requests.post(
+            resp = _session.post(
                 status_url,
                 headers=self._auth_headers(),
                 data={"id": download_id},
@@ -368,7 +375,7 @@ class AllDebridClient(DownloadClient):
         """Delete the magnet from AllDebrid and clean up local files."""
         try:
             url = f"{_API_BASE}/magnet/delete"
-            requests.post(
+            _session.post(
                 url,
                 headers=self._auth_headers(),
                 data={"id": download_id},
@@ -515,7 +522,7 @@ class AllDebridClient(DownloadClient):
 
         # 2. POST unlock (primary method).
         try:
-            resp = requests.post(
+            resp = _session.post(
                 unlock_url,
                 headers=headers,
                 data={"link": link},
@@ -544,7 +551,7 @@ class AllDebridClient(DownloadClient):
             get_url = (
                 f"{_API_BASE}/link/unlock?agent={_AGENT}&apikey={self._api_key}&link={encoded}"
             )
-            resp = requests.get(
+            resp = _session.get(
                 get_url,
                 headers=headers,
                 timeout=_API_TIMEOUT,
@@ -558,13 +565,14 @@ class AllDebridClient(DownloadClient):
                         return direct
                 err_msg = body.get("error", {}).get("message", err_msg)
         except _ALLDEBRID_CLIENT_ERRORS as e:
-            logger.debug("GET unlock exception: %s", e)
+            # The request URL carries the API key and requests puts it in the message.
+            logger.debug("GET unlock exception: %s", type(e).__name__)
 
         # 4. Last-resort: append apikey to alldebrid.com/f/ links.
         if "alldebrid.com/f/" in link:
             logger.info(
                 "Using apikey fallback for AllDebrid file link: %s",
-                link,
+                safe_url(link),
             )
             if "apikey=" not in link:
                 sep = "&" if "?" in link else "?"
@@ -573,7 +581,7 @@ class AllDebridClient(DownloadClient):
 
         logger.error(
             "AllDebrid unlock failed for '%s': %s",
-            link,
+            safe_url(link),
             err_msg,
         )
         msg = f"AllDebrid unlock failed: {err_msg}"
@@ -600,7 +608,7 @@ class AllDebridClient(DownloadClient):
             for _ in range(_DELAYED_POLL_MAX_ATTEMPTS):
                 time.sleep(_DELAYED_POLL_INTERVAL)
                 try:
-                    resp = requests.post(
+                    resp = _session.post(
                         delayed_url,
                         headers=headers,
                         data={"id": delayed_id},
@@ -654,13 +662,15 @@ class AllDebridClient(DownloadClient):
                 buf = download_url(
                     direct_link,
                     referer="https://alldebrid.com/",
+                    spool_to_disk=True,
                 )
                 if not buf:
-                    msg = f"Failed to download from {direct_link}"
+                    msg = f"Failed to download from {safe_url(direct_link)}"
                     _raise_runtime_error(msg)
 
-                with dest.open("wb") as fh:
-                    fh.write(buf.getvalue())
+                with buf, dest.open("wb") as fh:
+                    buf.seek(0)
+                    shutil.copyfileobj(buf, fh)
 
                 with state.lock:
                     state.progress = 50.0 + (idx + 1) / total * 50.0
@@ -692,7 +702,7 @@ class AllDebridClient(DownloadClient):
     ) -> list[dict[str, Any]]:
         """Retrieve and flatten the file tree for a magnet."""
         url = f"{_API_BASE}/magnet/files"
-        resp = requests.post(
+        resp = _session.post(
             url,
             headers=self._auth_headers(),
             data={"id[]": magnet_id},

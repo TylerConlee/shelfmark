@@ -2,6 +2,8 @@
 Tests for the naming module - template parsing and library path building.
 """
 
+from __future__ import annotations
+
 import shutil
 import tempfile
 from pathlib import Path
@@ -218,6 +220,61 @@ class TestParseNamingTemplate:
             template, {"Author": "Brandon Sanderson", "Title": "The Way of Kings"}
         )
         assert result == "Brandon Sanderson/The Way of Kings"
+
+
+class TestWordSeparator:
+    """Tests for the `word_separator` option (#1230)."""
+
+    def test_default_space_matches_prior_behavior(self):
+        """The default separator (' ') leaves placeholder values untouched."""
+        result = parse_naming_template(
+            "{Author}/{Title}", {"Author": "Arthur Conan Doyle", "Title": "The Hound"}
+        )
+        assert result == "Arthur Conan Doyle/The Hound"
+
+    def test_dot_separator_replaces_internal_spaces(self):
+        result = parse_naming_template(
+            "{Author}/{Title}",
+            {"Author": "Arthur Conan Doyle", "Title": "The Hound of the Baskervilles"},
+            word_separator=".",
+        )
+        assert result == "Arthur.Conan.Doyle/The.Hound.of.the.Baskervilles"
+
+    def test_underscore_and_hyphen_separators(self):
+        metadata = {"Author": "Arthur Conan Doyle", "Title": "The Hound"}
+        assert (
+            parse_naming_template("{Author} - {Title}", metadata, word_separator="_")
+            == "Arthur_Conan_Doyle - The_Hound"
+        )
+        assert (
+            parse_naming_template("{Author} - {Title}", metadata, word_separator="-")
+            == "Arthur-Conan-Doyle - The-Hound"
+        )
+
+    def test_literal_template_characters_are_untouched(self):
+        """A dot typed into the template itself is not affected by the setting."""
+        result = parse_naming_template(
+            "{Author}/{Author}.-.{Title}.({Year})",
+            {"Author": "Arthur Conan Doyle", "Title": "The Hound", "Year": 1902},
+            word_separator=".",
+        )
+        assert result == "Arthur.Conan.Doyle/Arthur.Conan.Doyle.-.The.Hound.(1902)"
+
+    def test_custom_separator(self):
+        result = parse_naming_template(
+            "{Author}", {"Author": "Arthur Conan Doyle"}, word_separator="~"
+        )
+        assert result == "Arthur~Conan~Doyle"
+
+    def test_build_library_path_applies_separator(self):
+        path = build_library_path(
+            "/books",
+            "{Author}/{Title}",
+            {"Author": "Arthur Conan Doyle", "Title": "The Hound"},
+            extension="epub",
+            word_separator=".",
+        )
+        assert path == Path("/books/Arthur.Conan.Doyle/The.Hound.epub")
 
 
 class TestArbitraryPrefixSuffix:
@@ -461,6 +518,21 @@ class TestSanitizeFilename:
         """Test empty string handling."""
         assert sanitize_filename("") == ""
         assert sanitize_filename(None) == ""
+
+    @pytest.mark.parametrize(
+        "name,max_length,expected",
+        [
+            ("aéz", 2, "a"),
+            ("aéz", 3, "aé"),
+            ("a界z", 3, "a"),
+            ("a界z", 4, "a界"),
+            ("a📚z", 4, "a"),
+            ("a📚z", 5, "a📚"),
+            ("é", 1, ""),
+        ],
+    )
+    def test_unicode_byte_limit_keeps_whole_characters(self, name, max_length, expected):
+        assert sanitize_filename(name, max_length=max_length) == expected
 
 
 class TestFormatSeriesPosition:
@@ -725,3 +797,16 @@ class TestFilesystemOperations:
         assert path is not None
         # Title component should be truncated
         assert len(path.stem) < 250
+
+    @pytest.mark.parametrize("character", ["Ж", "界", "📚"])
+    def test_long_unicode_names_can_be_saved(self, temp_library, character):
+        metadata = {"Author": character * 200, "Title": character * 200}
+        path = build_library_path(str(temp_library), "{Author}/{Title}", metadata, extension="epub")
+
+        assert len(path.parent.name.encode("utf-8")) <= 245
+        assert len(path.stem.encode("utf-8")) <= 245
+        assert path.suffix == ".epub"
+
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"book content")
+        assert path.read_bytes() == b"book content"

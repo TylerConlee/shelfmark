@@ -1,5 +1,7 @@
 """Tests for legacy download-setting migration into the current config model."""
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock
 
 

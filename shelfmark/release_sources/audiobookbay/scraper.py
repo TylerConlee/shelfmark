@@ -1,7 +1,12 @@
 """Web scraping functions for AudiobookBay."""
 
+from __future__ import annotations
+
+import base64
 import re
 import time
+from threading import Lock
+from typing import TYPE_CHECKING
 from urllib.parse import quote, quote_plus
 
 import requests
@@ -10,7 +15,11 @@ from bs4 import BeautifulSoup
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
 from shelfmark.download import http as downloader
+from shelfmark.download.postprocess.packs import PackFile
 from shelfmark.release_sources.audiobookbay.utils import normalize_search_punctuation
+
+if TYPE_CHECKING:
+    from bs4.element import Tag
 
 logger = setup_logger(__name__)
 
@@ -32,6 +41,13 @@ FIRST_PAGE_SESSION_REFRESH_ATTEMPTS = 2
 # Legacy search parameter used by older ABB flows
 LEGACY_CATEGORY_QUERY = "undefined%2Cundefined"
 
+# Detail pages are fetched once and shared by inspection (file list) and download
+# (magnet link) so a "review then download" round trip costs ABB a single request.
+DETAIL_PAGE_CACHE_TTL_SECONDS = 120.0
+DETAIL_PAGE_CACHE_MAX_ENTRIES = 8
+_detail_page_cache: dict[str, tuple[float, str]] = {}
+_detail_page_cache_lock = Lock()
+
 # Precompiled patterns used while parsing result cards
 LANGUAGE_PATTERN = re.compile(r"Language:\s*([A-Za-z]+)")
 POSTED_PATTERN = re.compile(r"Posted:\s*(\d+\s+[A-Za-z]+\s+\d{4})")
@@ -39,6 +55,11 @@ FORMAT_PATTERN = re.compile(r"Format:\s*([A-Za-z0-9]+)")
 BITRATE_PATTERN = re.compile(r"Bitrate:\s*([\d]+\s*[A-Za-z/]+)")
 SIZE_PATTERN = re.compile(r"File Size:\s*([\d.]+)\s*([A-Za-z]+)")
 INFO_HASH_LABEL_PATTERN = re.compile(r"Info Hash", re.IGNORECASE)
+FILE_ROW_SIZE_PATTERN = re.compile(
+    r"^(?P<name>.+?)\s+(?P<size>\d+(?:\.\d+)?)\s*(?P<unit>Bytes?|KBs?|MBs?|GBs?|TBs?)$",
+    re.IGNORECASE,
+)
+_FILE_SIZE_MULTIPLIERS = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
 
 
 def _coerce_non_negative_float(value: object, default: float) -> float:
@@ -103,6 +124,26 @@ def _encode_search_query(query: str, *, exact_phrase: bool) -> str:
     # '&' would otherwise start a new query parameter, '%' would open an invalid
     # escape, and a literal '+' would arrive as a space.
     return quote_plus(search_query)
+
+
+def _decode_post(post: Tag) -> Tag | BeautifulSoup:
+    """Decode ABB's base64-encoded post markup when present.
+
+    ABB serves post content base64-encoded inside a hidden ``.post`` div and
+    decodes it client-side with JavaScript; the decoded payload is the classic
+    ``.postTitle``/``.postInfo``/``.postContent`` markup. Plain-markup posts
+    (older mirrors) are returned unchanged, so never assume base64.
+    """
+    raw = "".join(post.get_text(strip=True).split())
+    if not raw or len(raw) < 32:
+        return post
+    try:
+        html = base64.b64decode(raw, validate=True).decode("utf-8", "replace")
+    except ValueError:
+        return post
+    if "postTitle" not in html:
+        return post
+    return BeautifulSoup(html, "html.parser")
 
 
 def _normalize_result_url(url: str, hostname: str) -> str:
@@ -235,12 +276,13 @@ def search_audiobookbay(
             # Parse HTML
             soup = BeautifulSoup(page_html, "html.parser")
 
-            # Extract book entries
-            posts = soup.select(".post")
+            # Extract book entries (decoding ABB's base64-wrapped markup when present)
+            posts = [_decode_post(p) for p in soup.select(".post")]
             if not posts:
                 # No more results
                 break
 
+            parsed_before = len(results)
             for post in posts:
                 try:
                     # Extract title
@@ -337,6 +379,16 @@ def search_audiobookbay(
                     logger.debug("Skipping post due to error: %s", e)
                     continue
 
+            # A page with .post elements that all fail to parse usually means ABB
+            # changed its markup; without this the source silently returns [].
+            if len(results) == parsed_before:
+                logger.warning(
+                    "ABB page %s: found %d .post elements but parsed 0 results, "
+                    "site markup may have changed",
+                    page,
+                    len(posts),
+                )
+
             # Rate limiting delay between pages
             if page < max_pages and rate_limit_delay > 0:
                 time.sleep(rate_limit_delay)
@@ -346,6 +398,162 @@ def search_audiobookbay(
 
     logger.info("Found %s results for query '%s'", len(results), query)
     return results
+
+
+def _get_cached_detail_page(details_url: str) -> str | None:
+    with _detail_page_cache_lock:
+        entry = _detail_page_cache.get(details_url)
+        if entry is None:
+            return None
+        fetched_at, html = entry
+        if time.monotonic() - fetched_at > DETAIL_PAGE_CACHE_TTL_SECONDS:
+            del _detail_page_cache[details_url]
+            return None
+    return html
+
+
+def _store_cached_detail_page(details_url: str, html: str) -> None:
+    with _detail_page_cache_lock:
+        _detail_page_cache[details_url] = (time.monotonic(), html)
+        while len(_detail_page_cache) > DETAIL_PAGE_CACHE_MAX_ENTRIES:
+            oldest = min(_detail_page_cache, key=lambda key: _detail_page_cache[key][0])
+            del _detail_page_cache[oldest]
+
+
+def clear_detail_page_cache() -> None:
+    """Drop cached detail pages (used by tests)."""
+    with _detail_page_cache_lock:
+        _detail_page_cache.clear()
+
+
+def _fetch_detail_page_once(details_url: str, hostname: str) -> str:
+    session = requests.Session()
+    _bootstrap_abb_session(hostname, session, DETAIL_PAGE_RETRY_ATTEMPTS)
+    return _coerce_markup_to_html(
+        downloader.html_get_page(
+            details_url,
+            retry=DETAIL_PAGE_RETRY_ATTEMPTS,
+            use_bypasser=False,
+            allow_bypasser_fallback=False,
+            success_delay=0,
+            session=session,
+        )
+    )
+
+
+def fetch_detail_html(details_url: str, hostname: str = "audiobookbay.lu") -> str:
+    """Fetch a detail page (one retry with a fresh session), cached briefly per URL."""
+    cached = _get_cached_detail_page(details_url)
+    if cached is not None:
+        logger.debug("Reusing recently fetched detail page: %s", details_url)
+        return cached
+    detail_html = _fetch_detail_page_once(details_url, hostname)
+    if not detail_html:
+        detail_html = _fetch_detail_page_once(details_url, hostname)
+    if detail_html:
+        _store_cached_detail_page(details_url, detail_html)
+    return detail_html
+
+
+def _parse_file_row(text: str) -> PackFile | None:
+    match = FILE_ROW_SIZE_PATTERN.match(text.strip())
+    if not match:
+        return None
+    multiplier = _FILE_SIZE_MULTIPLIERS[match.group("unit")[0].lower()]
+    return PackFile(match.group("name"), int(float(match.group("size")) * multiplier))
+
+
+def extract_file_list(detail_html: str) -> list[PackFile] | None:
+    """Read the torrent file rows off a detail page.
+
+    ABB renders the torrent's file table as single-cell rows between the
+    "This is a Multifile Torrent" marker (absent for single-file torrents) and the
+    "Combined File Size" row. Returns None when the page has no such table.
+    """
+    soup = BeautifulSoup(detail_html, "html.parser")
+    rows: list[PackFile] = []
+    for row in soup.find_all("tr"):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        label = cells[0].get_text(" ", strip=True)
+        if label.lower().startswith("combined file size"):
+            return rows or None
+        if len(cells) != 1:
+            rows = []  # a two-column metadata row means we're not in the file table yet
+            continue
+        text = cells[0].get_text(" ", strip=True)
+        if "multifile torrent" in text.lower():
+            rows = []
+            continue
+        parsed = _parse_file_row(text)
+        if parsed is not None:
+            rows.append(parsed)
+    return None
+
+
+# One credit in a line of them: "Anne Rice (Author)", "Dylan Baker (Reader)".
+_CREDIT = re.compile(r"^(?P<name>[^()]+?)\s*\((?P<role>[A-Za-z ]+)\)$")
+_LEADING_BY = re.compile(r"^\s*by\s+", re.IGNORECASE)
+_AUTHOR_ROLES = frozenset({"author", "writer"})
+
+
+def _credited_authors(text: str) -> list[str]:
+    """Authors from a paragraph that is nothing but credits, else an empty list.
+
+    "by Anne Rice (Author)" and "James Patterson (Author), Richard DiLallo (Author),
+    Dylan Baker (Reader)" qualify. A paragraph with anything else in it is description,
+    and a name it mentions says nothing about who wrote the book.
+    """
+    parts = [part.strip() for part in _LEADING_BY.sub("", text).split(",")]
+    matches = [_CREDIT.match(part) for part in parts]
+    if not parts or not all(matches):
+        return []
+    return [
+        credit.group("name").strip()
+        for credit in matches
+        if credit and credit.group("role").strip().lower() in _AUTHOR_ROLES
+    ]
+
+
+def extract_authors(detail_html: str) -> list[str]:
+    """The book's authors as a detail page credits them; empty when it does not say.
+
+    Newer posts mark the authors up ("Written by" and ``span.author``); older ones, whose
+    listing title carries no " - Author", have a line of credits instead. Only names
+    credited as the author count: a narrator is not one, and a name in the description
+    is not read at all.
+    """
+    soup = BeautifulSoup(detail_html, "html.parser")
+    content = soup.select_one(".postContent") or soup
+    marked = [span.get_text(" ", strip=True) for span in content.select("span.author")]
+    if any(marked):
+        return [name for name in marked if name]
+    for paragraph in content.find_all("p"):
+        authors = _credited_authors(paragraph.get_text(" ", strip=True))
+        if authors:
+            return authors
+    return []
+
+
+# What a visitor writes under a post nobody is seeding: "0 seeders", "no seeds", "please seed",
+# "unseeded", "dead". Anything shorter or vaguer than these is ignored.
+_SEED_COMPLAINT_PATTERN = re.compile(
+    r"\b(?:0|no|zero)\s+seed(?:s|ers?)?\b"
+    r"|\bunseeded\b|\bnot\s+seeding\b|\bno\s+one\s+(?:is\s+)?seeding\b"
+    r"|\bplease\s+(?:re-?)?seed\b|\bseeders?\s+needed\b|\bneeds?\s+seed|\bdead\b",
+    re.IGNORECASE,
+)
+
+
+def extract_seed_complaints(detail_html: str) -> int:
+    """How many comments on a post say nobody is seeding it. A hint, not a seed count."""
+    soup = BeautifulSoup(detail_html, "html.parser")
+    return sum(
+        1
+        for body in soup.select('[itemprop="reviewBody"]')
+        if _SEED_COMPLAINT_PATTERN.search(body.get_text(" ", strip=True))
+    )
 
 
 def extract_magnet_link(details_url: str, hostname: str = "audiobookbay.lu") -> str | None:
@@ -360,35 +568,7 @@ def extract_magnet_link(details_url: str, hostname: str = "audiobookbay.lu") -> 
 
     """
     try:
-        session = requests.Session()
-        _bootstrap_abb_session(hostname, session, DETAIL_PAGE_RETRY_ATTEMPTS)
-
-        # Fetch detail page
-        detail_html = _coerce_markup_to_html(
-            downloader.html_get_page(
-                details_url,
-                retry=DETAIL_PAGE_RETRY_ATTEMPTS,
-                use_bypasser=False,
-                allow_bypasser_fallback=False,
-                success_delay=0,
-                session=session,
-            )
-        )
-
-        if not detail_html:
-            session = requests.Session()
-            _bootstrap_abb_session(hostname, session, DETAIL_PAGE_RETRY_ATTEMPTS)
-            detail_html = _coerce_markup_to_html(
-                downloader.html_get_page(
-                    details_url,
-                    retry=DETAIL_PAGE_RETRY_ATTEMPTS,
-                    use_bypasser=False,
-                    allow_bypasser_fallback=False,
-                    success_delay=0,
-                    session=session,
-                )
-            )
-
+        detail_html = fetch_detail_html(details_url, hostname)
         if not detail_html:
             logger.warning("Failed to fetch details page")
             return None

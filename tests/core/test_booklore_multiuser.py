@@ -1,5 +1,7 @@
 """Tests for per-user BookLore library/path support."""
 
+from __future__ import annotations
+
 from shelfmark.download.outputs.booklore import build_booklore_config
 
 

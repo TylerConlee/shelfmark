@@ -1,5 +1,7 @@
 """Authentication settings registration."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 from shelfmark.config.migrations import migrate_security_settings
@@ -102,10 +104,7 @@ def security_settings() -> list[SettingsField]:
         CustomComponentField(
             key="builtin_admin_requirement",
             component="oidc_admin_hint",
-            label=(
-                "Local authentication is inactive until a local admin account with a "
-                "password is created."
-            ),
+            label="A local admin account is required before Local authentication can be enabled.",
             show_when=_auth_condition("builtin"),
         ),
         *(
@@ -129,8 +128,8 @@ def security_settings() -> list[SettingsField]:
                     component="oidc_admin_hint",
                     label=(
                         "Calibre-Web database not detected. Mount your app.db to "
-                        "/auth/app.db to enable this method. Authentication will fall "
-                        "back to none until the database is available."
+                        "/auth/app.db to enable this method. Sign-in fails until the "
+                        "database is available."
                     ),
                     show_when=_auth_condition("cwa"),
                 ),
@@ -178,6 +177,18 @@ def security_settings() -> list[SettingsField]:
             description="Optional: users in this group are treated as admins. Leave blank to skip group-based admin detection.",
             placeholder="e.g. admins",
             default="",
+        ),
+        _auth_field(
+            SelectField,
+            "proxy",
+            key="PROXY_AUTH_DEFAULT_ROLE",
+            label="Proxy Auth Default Role",
+            description="Role for users the proxy authenticates for the first time when no admin group is configured. The first account is always an admin so the instance is never left without one.",
+            options=[
+                {"value": "user", "label": "User"},
+                {"value": "admin", "label": "Admin"},
+            ],
+            default="user",
         ),
     ]
 

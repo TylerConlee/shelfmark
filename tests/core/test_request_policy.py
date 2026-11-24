@@ -1,5 +1,7 @@
 """Tests for request-policy resolution."""
 
+from __future__ import annotations
+
 from shelfmark.core.request_policy import (
     PolicyMode,
     filter_request_policy_settings,

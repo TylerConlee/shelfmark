@@ -316,7 +316,7 @@ class DownloadTracker:
                         "data": error_entries[book_id],
                     }
 
-            except requests.exceptions.RequestException, ValueError, TypeError:
+            except (requests.exceptions.RequestException, ValueError, TypeError):
                 pass
 
             time.sleep(POLL_INTERVAL)

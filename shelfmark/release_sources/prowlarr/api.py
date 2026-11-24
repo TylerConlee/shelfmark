@@ -1,7 +1,10 @@
 """Prowlarr API client for connection testing, indexer listing, and search."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from contextlib import suppress
+from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any, TypedDict
 
@@ -10,7 +13,7 @@ import requests
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
 from shelfmark.core.utils import normalize_http_url
-from shelfmark.download.network import get_ssl_verify
+from shelfmark.download.network import get_proxies, get_ssl_verify
 from shelfmark.release_sources.prowlarr.torznab import parse_torznab_xml
 from shelfmark.release_sources.prowlarr.utils import coerce_float_like, coerce_int_like
 
@@ -51,19 +54,24 @@ class ProwlarrSearchError(RuntimeError):
     """
 
 
-def resolve_indexer_timeout(timeout: object = None) -> int:
+def resolve_indexer_timeout(
+    timeout: object = None, *, config_key: str = "PROWLARR_INDEXER_TIMEOUT"
+) -> int:
     """Resolve the per-indexer search timeout, falling back to config.
+
+    ``config_key`` lets other Torznab-proxy sources (Jackett) reuse the clamping.
 
     Out-of-range and unparsable values are clamped rather than rejected: this
     feeds an HTTP timeout, and a bad setting should not take searching down.
     """
     if timeout is None:
-        timeout = config.get("PROWLARR_INDEXER_TIMEOUT", DEFAULT_INDEXER_TIMEOUT_SECONDS)
+        timeout = config.get(config_key, DEFAULT_INDEXER_TIMEOUT_SECONDS)
 
     resolved = coerce_int_like(timeout)
     if resolved is None:
         logger.warning(
-            "Invalid PROWLARR_INDEXER_TIMEOUT %r - using %ss",
+            "Invalid %s %r - using %ss",
+            config_key,
             timeout,
             DEFAULT_INDEXER_TIMEOUT_SECONDS,
         )
@@ -106,7 +114,8 @@ def _normalize_json_object_list(payload: object, *, context: str) -> list[dict[s
     return [_normalize_json_object(item, context=context) for item in payload]
 
 
-def _get_field_value(fields: object, name: str) -> object | None:
+def get_indexer_field(fields: object, name: str) -> object | None:
+    """Return a setting's value from a Prowlarr indexer's "fields" list."""
     if not isinstance(fields, list):
         return None
 
@@ -117,6 +126,17 @@ def _get_field_value(fields: object, name: str) -> object | None:
             return field.get("value")
 
     return None
+
+
+def is_myanonamouse_indexer(indexer: Mapping[str, Any]) -> bool:
+    """Whether a Prowlarr indexer record is the MyAnonamouse implementation."""
+    implementation = str(
+        indexer.get("implementation")
+        or indexer.get("implementationName")
+        or indexer.get("definitionName")
+        or ""
+    )
+    return implementation.strip().lower() == "myanonamouse"
 
 
 class ProwlarrClient:
@@ -165,6 +185,7 @@ class ProwlarrClient:
                 params=params,
                 json=json_data,
                 timeout=self.timeout,
+                proxies=get_proxies(url),
                 verify=get_ssl_verify(url),
             )
 
@@ -235,6 +256,34 @@ class ProwlarrClient:
             logger.exception("Failed to get indexers")
             return []
 
+    def get_disabled_indexers(self, *, now: datetime | None = None) -> dict[int, str]:
+        """Get indexers in failure back-off, keyed by ID with their disabledTill value."""
+        try:
+            entries = _normalize_json_object_list(
+                self._request("GET", "/api/v1/indexerstatus"),
+                context="Prowlarr indexer status",
+            )
+        except _PROWLARR_CLIENT_ERRORS:
+            logger.exception("Failed to get indexer status")
+            return {}
+
+        current = now or datetime.now(UTC)
+        disabled: dict[int, str] = {}
+        for entry in entries:
+            indexer_id = coerce_int_like(entry.get("indexerId"))
+            disabled_till_raw = entry.get("disabledTill")
+            if indexer_id is None or not disabled_till_raw:
+                continue
+            try:
+                disabled_till = datetime.fromisoformat(str(disabled_till_raw))
+            except ValueError:
+                continue
+            if disabled_till.tzinfo is None:
+                disabled_till = disabled_till.replace(tzinfo=UTC)
+            if disabled_till > current:
+                disabled[indexer_id] = str(disabled_till_raw)
+        return disabled
+
     def get_enabled_indexers_detailed(
         self, *, raise_on_error: bool = False
     ) -> list[dict[str, Any]]:
@@ -271,14 +320,8 @@ class ProwlarrClient:
             if restrict_to is not None and idx_id_int not in restrict_to:
                 continue
 
-            impl = str(
-                idx.get("implementation")
-                or idx.get("implementationName")
-                or idx.get("definitionName")
-                or ""
-            )
             # Currently only MyAnonamouse provides consistently rich Torznab metadata.
-            if impl.strip().lower() == "myanonamouse":
+            if is_myanonamouse_indexer(idx):
                 enriched_ids.append(idx_id_int)
 
         return enriched_ids
@@ -310,9 +353,9 @@ class ProwlarrClient:
                 continue
 
             fields = idx.get("fields")
-            ratio_limit = coerce_float_like(_get_field_value(fields, _INDEXER_FIELD_SEED_RATIO))
+            ratio_limit = coerce_float_like(get_indexer_field(fields, _INDEXER_FIELD_SEED_RATIO))
             seeding_time_limit = coerce_int_like(
-                _get_field_value(fields, _INDEXER_FIELD_SEED_TIME_MINUTES)
+                get_indexer_field(fields, _INDEXER_FIELD_SEED_TIME_MINUTES)
             )
 
             settings: IndexerSeedSettings = {}
@@ -397,6 +440,7 @@ class ProwlarrClient:
                     # Override the session default JSON accept header.
                     "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"
                 },
+                proxies=get_proxies(url),
                 verify=get_ssl_verify(url),
             )
             if not response.ok:

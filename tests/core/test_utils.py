@@ -1,5 +1,7 @@
 """Tests for shared utility helpers."""
 
+from __future__ import annotations
+
 import sys
 import types
 import xmlrpc.client as stdlib_xmlrpc_client

@@ -6,6 +6,8 @@ own budget, and when one runs out the caller has to hear about it instead of
 receiving an empty list that reads as "this book has no releases".
 """
 
+from __future__ import annotations
+
 import pytest
 import requests
 

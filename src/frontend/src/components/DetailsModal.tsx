@@ -9,6 +9,7 @@ import { isMetadataBook } from '../types';
 import { bookSupportsTargets } from '../utils/bookTargetLoader';
 import { isUserCancelledError } from '../utils/errors';
 import { BookTargetDropdown } from './BookTargetDropdown';
+import { LibraryBadge, isInLibrary } from './shared';
 
 interface DetailsModalProps {
   book: Book | null;
@@ -293,6 +294,13 @@ export const DetailsModal = ({
                       </div>
                     ))}
                 </div>
+
+                {isMetadata && isInLibrary(book.library) && (
+                  <div className={`${infoCardClass} space-y-1`}>
+                    <p className={infoLabelClass}>Library</p>
+                    <LibraryBadge library={book.library} />
+                  </div>
+                )}
 
                 {/* ISBN - Universal mode only */}
                 {isMetadata && (book.isbn_13 || book.isbn_10) && (

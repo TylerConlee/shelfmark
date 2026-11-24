@@ -1,5 +1,7 @@
 """Tests for the shared language resolution used by every release source."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 

@@ -1,5 +1,7 @@
 """Tests for the OIDC Test Connection handler."""
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock, patch
 
 from shelfmark.config.security_handlers import check_oidc_connection

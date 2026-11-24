@@ -2,6 +2,8 @@
 Tests for the download client infrastructure.
 """
 
+from __future__ import annotations
+
 import pytest
 import requests
 

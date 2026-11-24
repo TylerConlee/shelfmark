@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from shelfmark.release_sources import Release
 from shelfmark.release_sources.irc import cache
 

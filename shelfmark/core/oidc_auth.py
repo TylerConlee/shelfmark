@@ -4,6 +4,8 @@ Handles group claim parsing, user info extraction, and user provisioning.
 Flask route handlers are registered separately in main.py.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 from shelfmark.core.external_user_linking import upsert_external_user

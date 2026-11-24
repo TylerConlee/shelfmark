@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import requests
 
 from shelfmark.core.cache import get_metadata_cache

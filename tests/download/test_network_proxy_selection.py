@@ -1,5 +1,7 @@
 """Tests for proxy selection and NO_PROXY bypass handling."""
 
+from __future__ import annotations
+
 
 def _set_proxy_config(monkeypatch, **values):
     import shelfmark.download.network as network
@@ -59,3 +61,19 @@ def test_get_proxies_returns_socks_proxy_for_both_schemes(monkeypatch):
         "http": "socks5://proxy.local:1080",
         "https": "socks5://proxy.local:1080",
     }
+
+
+def test_a_url_that_fails_to_parse_is_not_written_to_the_log(monkeypatch):
+    """The proxy check logs why a URL did not parse, never the URL itself."""
+    from unittest.mock import patch
+
+    network = _set_proxy_config(monkeypatch, NO_PROXY="localhost")
+    # An unterminated IPv6 literal makes urlparse raise ValueError.
+    url = "http://user:s3cret@[::1/path?apikey=s3cret"
+
+    with patch.object(network.logger, "debug") as debug:
+        assert network.should_bypass_proxy(url) is False
+
+    logged = " ".join(str(arg) for call in debug.call_args_list for arg in call.args)
+    assert "Failed to parse URL" in logged
+    assert "s3cret" not in logged

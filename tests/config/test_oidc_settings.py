@@ -5,6 +5,8 @@ Tests that OIDC fields are registered correctly with proper
 show_when conditions, defaults, and field types.
 """
 
+from __future__ import annotations
+
 from shelfmark.core.settings_registry import (
     CheckboxField,
     PasswordField,

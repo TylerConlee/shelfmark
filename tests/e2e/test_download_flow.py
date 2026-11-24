@@ -7,6 +7,8 @@ They require external services to be available and may take longer to run.
 Run with: uv run pytest tests/e2e/test_download_flow.py -v -m e2e
 """
 
+from __future__ import annotations
+
 import time
 
 import pytest

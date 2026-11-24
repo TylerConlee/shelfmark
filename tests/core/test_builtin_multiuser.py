@@ -1,5 +1,7 @@
 """Tests for multi-user builtin authentication via users table."""
 
+from __future__ import annotations
+
 import os
 import tempfile
 

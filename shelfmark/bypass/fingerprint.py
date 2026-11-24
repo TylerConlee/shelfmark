@@ -1,5 +1,7 @@
 """Browser fingerprint profile management for bypass stealth."""
 
+from __future__ import annotations
+
 import random
 
 from shelfmark.core.logger import setup_logger

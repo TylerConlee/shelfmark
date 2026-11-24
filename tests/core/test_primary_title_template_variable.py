@@ -1,5 +1,7 @@
 """Tests for subtitle-less title template variables."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from shelfmark.core.models import DownloadTask

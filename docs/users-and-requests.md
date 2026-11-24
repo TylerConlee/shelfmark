@@ -26,31 +26,52 @@ User accounts are synced from your Calibre-Web `app.db`. If a local user with a 
 
 Requires mounting your Calibre-Web `app.db` to `/auth/app.db`.
 
+### If a method's requirements go missing
+
+Once a method is selected, Shelfmark keeps requiring sign-in even if that method's requirements go missing later (a deleted local admin, a missing `app.db`, incomplete OIDC settings, or an unrecognized `AUTH_METHOD` value). It never falls back to "No Authentication" on its own. While Local or OIDC authentication is active, the last local admin can't be deleted or demoted.
+
+If you're locked out, start the container once with `AUTH_METHOD=none`, create a local admin under **Settings → Users**, then remove the override. Keep Shelfmark off the public internet while the override is set.
+
 ## Per-User Settings
 
 Admins can configure per-user settings by editing a user in the user management panel. Non-admin users can also edit their own settings through **My Account** (accessible from the user menu). Admins control which sections are visible in My Account via the **Visible Self-Settings Sections** option.
 
-There are three categories of per-user settings:
+There are four categories of per-user settings:
 
 ### Delivery Preferences
 
 Override where a user's downloads are sent. Options depend on the global output mode configuration:
 
-- **Output mode** — Folder, Email (SMTP), or BookLore (API)
+- **Output mode** — Folder, Email (SMTP), or Grimmory (API)
 - **Destination** — A custom folder path for this user's ebook downloads
 - **Audiobook destination** — A custom folder path for audiobook downloads
-- **BookLore library/path** — Per-user BookLore target (when using BookLore output mode)
+- **Grimmory library/path** — Per-user Grimmory target (when using Grimmory output mode)
 - **Email recipient** — Per-user email address (when using Email output mode)
+
+### Search Preferences
+
+Override how a user searches, on top of the global search defaults:
+
+- **Search mode** — Direct or Universal for this user
+- **Default book languages** — The languages a user's searches fall back to when they don't pick one themselves. Useful for a shared instance where readers want different languages.
+- **Metadata providers** — Book, audiobook, and combined-mode provider for this user
+- **Default release sources** — The release tab opened first for books and audiobooks
 
 ### Notifications
 
 Users can configure personal notification routes, separate from the global notification settings. Each route targets a URL (e.g. an Apprise-compatible endpoint) and can be scoped to specific event types or all events.
+
+Route URLs can use `{User}` and `{Email}` in their path or query, filled in from each user's account when a notification is sent. A route is skipped for users without the value it needs, or whose value contains spaces or any of `, ; / \ "` (or is only dots, such as `..`), since those would split it into several targets or change the URL path. The admin-set default routes apply to every user who hasn't set routes of their own and can use any service, so one default such as `mailtos://user:pass@smtp.example.com?to={Email}` reaches each user at their own address. The service a default points to then receives each user's email address, so only use one you trust with it. Routes a user sets themselves stay limited to the personal-route services, e.g. `ntfys://ntfy.sh/shelfmark-{User}`.
 
 ### Request Policy (admin-only)
 
 Admins can override the default ebook/audiobook modes and request rules for individual users. See [Per-User Overrides](#per-user-overrides) below.
 
 ---
+
+## Clearing the activity list
+
+**Clear Completed** in the activity list clears finished downloads and their requests, and also finished requests that never had a download, such as a request closed because the book was already in the library. Pending and rejected requests are left alone.
 
 ## Requests
 
@@ -77,12 +98,15 @@ Each content type (ebook, audiobook) has a default mode that sets the baseline:
 | Request Rules | Per-source overrides (see below) | None |
 | Max Pending Requests Per User | Open request limit per user | 20 |
 | Allow Notes on Requests | Let users attach a note when submitting | On |
+| Allow book requests alongside downloads | Let users who can download also request a book without choosing a release, for a book nobody has released yet or one no source has. The request waits for an admin, and the user gets the Requests tab to follow or cancel it. Admins can always do this | Off |
 
 ### Request Rules
 
 The rules matrix lets you override the mode for specific source + content type combinations. Rules can only be **equal to or more restrictive** than the content-type default — they cannot grant more access than the baseline.
 
 For example, if the default ebook mode is "Download", a rule can restrict a specific source to "Request Release" or "Blocked", but not the other way around. If no rule matches, the content-type default applies.
+
+Rules cannot use "Request Book". Sources whose browse results are already concrete releases are also treated as "Request Release" when the default mode is "Request Book", since there is no book-level request to make for them.
 
 ### Per-User Overrides
 
@@ -94,5 +118,16 @@ Admins can override the default ebook/audiobook modes and request rules for indi
 2. Request appears in the admin request queue as **pending**
 3. Admin either **fulfils** (queues a download) or **rejects** the request
 4. For fulfilled requests, delivery state is tracked through the download pipeline
-5. If delivery fails, an admin can reopen the request to try a different release
+5. If delivery fails and the download cannot be retried, the request goes back to pending automatically so an admin can approve it again with a different release. An admin can also reopen a rejected request
 6. Users can cancel their own pending requests
+7. An admin can **reopen** a rejected request, from the Requests tab or from History. It goes back to pending with what the user originally asked for, and shows in the activity list again even if the user had dismissed it. A fulfilled request whose download failed or was cancelled can be reopened the same way: it goes back to pending without its release, and the next automatic search skips the release that failed (an admin can still pick it by hand).
+
+An admin sees who declined a request and when on its card, with the admin note if one was given.
+
+### Rejected view (this fork)
+
+A button next to History opens **Rejected**: every rejected request, including ones cleared from the activity list, each with **Reopen**. A card can be hidden from this view, and **Show hidden (N)** in its header brings hidden ones back, so a request is never out of reach. Hiding here is separate from clearing a card in Activity.
+
+Every card shows the format as a coloured pill: **Audiobook** or **Ebook** on a request, or the file format (EPUB, M4B, MP3) once a release is chosen or downloaded. Audio is violet and ebooks are orange.
+
+Admin actions taken by scripts or automation carry an admin note starting `[auto]`, for example `[auto] Already in the library.`, so they can be told apart from decisions a person made.

@@ -1,5 +1,7 @@
 """Unit tests for the Newznab release cache."""
 
+from __future__ import annotations
+
 import time
 from unittest.mock import patch
 

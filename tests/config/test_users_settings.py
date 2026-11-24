@@ -1,5 +1,7 @@
 """Tests for users/request settings registration."""
 
+from __future__ import annotations
+
 import shelfmark.config.users_settings  # noqa: F401
 from shelfmark.config import users_settings as users_settings_module
 from shelfmark.core import settings_registry
@@ -90,7 +92,7 @@ def test_visible_self_settings_sections_field_defaults_and_options():
         {
             "value": "search",
             "label": "Search Preferences",
-            "description": "Show personal search mode and provider settings.",
+            "description": "Show personal search mode, language, and provider settings.",
         },
         {
             "value": "notifications",

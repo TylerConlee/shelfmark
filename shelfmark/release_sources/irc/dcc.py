@@ -3,6 +3,8 @@
 Handles DCC SEND file transfers used by IRC bots to send files.
 """
 
+from __future__ import annotations
+
 import re
 import socket
 import struct
@@ -162,8 +164,8 @@ def download_dcc(
                 # Read chunk
                 try:
                     chunk = sock.recv(BUFFER_SIZE)
-                except TimeoutError as e:
-                    msg = f"Timeout reading from {offer.ip}:{offer.port}"
+                except OSError as e:  # timeouts and resets alike: the DCC peer, not IRC
+                    msg = f"Failed reading from {offer.ip}:{offer.port}: {e}"
                     raise DCCError(msg) from e
 
                 if not chunk:

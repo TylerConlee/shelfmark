@@ -5,6 +5,8 @@ These tests mock the transmission-rpc library to test the client logic
 without requiring a running Transmission instance.
 """
 
+from __future__ import annotations
+
 import sys
 import types
 from datetime import timedelta

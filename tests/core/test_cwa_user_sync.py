@@ -1,5 +1,7 @@
 """Tests for CWA user linking/provisioning helpers."""
 
+from __future__ import annotations
+
 import os
 import tempfile
 

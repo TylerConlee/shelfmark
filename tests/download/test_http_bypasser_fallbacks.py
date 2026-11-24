@@ -1,5 +1,7 @@
 """Tests for HTTP bypasser fallback handling."""
 
+from __future__ import annotations
+
 import requests
 
 from shelfmark.bypass import BypassCancelledError

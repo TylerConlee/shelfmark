@@ -1,5 +1,7 @@
 """qBittorrent download client settings fields and test-connection callback."""
 
+from __future__ import annotations
+
 import types
 from unittest.mock import patch
 
@@ -65,6 +67,18 @@ def test_api_key_field_is_registered():
     assert field.show_when == {"field": "PROWLARR_TORRENT_CLIENT", "value": "qbittorrent"}
 
 
+@pytest.mark.parametrize("key", ["TORRENT_NO_SEEDERS_WAIT", "TORRENT_MIN_SEEDERS"])
+def test_seed_settings_are_offered_for_qbittorrent_only(key):
+    """Only qBittorrent reports seed counts, so the other torrent clients ignore these (U7)."""
+    from shelfmark.download.clients.settings import prowlarr_clients_settings
+
+    field = _get_field(prowlarr_clients_settings(), key)
+
+    assert field is not None
+    assert field.show_when == {"field": "PROWLARR_TORRENT_CLIENT", "value": "qbittorrent"}
+    assert "qBittorrent" in field.description
+
+
 @pytest.mark.parametrize(
     ("api_key", "expected_kwarg", "expected_suffix"),
     [(API_KEY, API_KEY, " using the API key"), ("", None, "")],
@@ -110,3 +124,23 @@ def test_settings_test_connection_names_rejected_credential(monkeypatch, api_key
     )
 
     assert result == {"success": False, "message": f"qBittorrent rejected the {rejected}"}
+
+
+@pytest.mark.parametrize(
+    ("url", "forced"),
+    [("https://qbittorrent.example.com", True), ("http://localhost:8080", False)],
+)
+def test_settings_test_connection_keeps_an_explicit_https_scheme(monkeypatch, url, forced):
+    """The button connects the same way downloads do, so https:// can't drop to HTTP (#1417)."""
+    captured = {}
+    _run_test_connection(
+        monkeypatch,
+        {
+            "QBITTORRENT_URL": url,
+            "QBITTORRENT_USERNAME": "admin",
+            "QBITTORRENT_PASSWORD": "password",
+        },
+        fake_qbittorrentapi(captured=captured),
+    )
+
+    assert captured["FORCE_SCHEME_FROM_HOST"] is forced

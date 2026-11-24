@@ -1,5 +1,7 @@
 """Tests for the stall-detection activity grace signalling."""
 
+from __future__ import annotations
+
 import pytest
 
 from shelfmark.core.models import QueueStatus

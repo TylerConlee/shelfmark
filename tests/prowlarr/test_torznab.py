@@ -1,5 +1,7 @@
 """Tests for Torznab XML parsing helpers."""
 
+from __future__ import annotations
+
 from shelfmark.release_sources.prowlarr.torznab import parse_torznab_xml
 
 

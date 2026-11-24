@@ -1,5 +1,7 @@
 """Tests for DNS failover and rotation behavior."""
 
+from __future__ import annotations
+
 
 def _set_auto_dns_mode(monkeypatch):
     import shelfmark.download.network as network

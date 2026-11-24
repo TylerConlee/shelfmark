@@ -5,6 +5,8 @@ is an optimisation, so the load-bearing property is that it can never affect sta
 a source that is down, misconfigured or raising must leave the app running.
 """
 
+from __future__ import annotations
+
 import pytest
 
 

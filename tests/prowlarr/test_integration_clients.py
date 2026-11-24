@@ -10,6 +10,8 @@ These tests use the actual Docker stack configuration. Before running:
 2. Configure clients via the cwabd UI at http://localhost:8084/settings
 """
 
+from __future__ import annotations
+
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

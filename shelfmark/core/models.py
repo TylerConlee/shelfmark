@@ -1,11 +1,41 @@
 """Data structures and models used across the application."""
 
+from __future__ import annotations
+
 import re
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+_FORMAT_RE = re.compile(r"[a-z0-9]{1,10}")
+
+
+def normalize_format(fmt: object) -> str | None:
+    """Return ``fmt`` as a lower-case plain file extension, or None if it is not one.
+
+    Accepts only 1 to 10 ASCII letters or digits (epub, mobi, m4b, azw3, cbz...). Anything
+    else, including separators, dots and control characters, is rejected rather than
+    cleaned, because the value ends up in a staging file name.
+    """
+    if not isinstance(fmt, str):
+        return None
+    candidate = fmt.strip().lstrip(".").lower()
+    return candidate if _FORMAT_RE.fullmatch(candidate) else None
+
+
+def resolve_staged_path(base_dir: Path, name: str) -> Path:
+    """Return ``base_dir / name`` after checking it is a direct child of ``base_dir``.
+
+    Raises ValueError when ``name`` would land anywhere else (separators, ``..``, a
+    symlink pointing out, or the directory itself).
+    """
+    resolved_base = base_dir.resolve()
+    path = base_dir / name
+    if not name or path.resolve().parent != resolved_base:
+        raise ValueError(f"Refusing staging path outside {base_dir}")
+    return path
 
 
 def build_filename(
@@ -26,8 +56,9 @@ def build_filename(
     filename = "".join(parts)
     filename = re.sub(r'[\\/:*?"<>|]', "_", filename.strip())[:245]
 
-    if fmt:
-        filename = f"{filename}.{fmt}"
+    safe_fmt = normalize_format(fmt)
+    if safe_fmt:
+        filename = f"{filename}.{safe_fmt}"
 
     return filename
 
@@ -97,6 +128,7 @@ class DownloadTask:
     year: str | None = None
     format: str | None = None
     size: str | None = None
+    downloads: int | None = None  # Download count from source
     preview: str | None = None
     content_type: str | None = None  # "book (fiction)", "audiobook", "magazine", etc.
     source_url: str | None = None  # Original release URL used by source-specific handlers
@@ -119,10 +151,15 @@ class DownloadTask:
     series_name: str | None = None
     series_position: float | None = None  # Float for novellas (e.g., 1.5)
     subtitle: str | None = None  # Book subtitle for naming templates
+    narrator: str | None = None  # Release narrator for the {Narrator} template variable
     language: str | None = None  # Release language code for the {Language} template variable
 
     # Hardlinking support
     original_download_path: str | None = None  # Path in download client (for hardlinking)
+
+    # True when the task picked up work that was already under way (a torrent the client had,
+    # files already on disk) instead of starting it. The activity card shows it as a pill.
+    reattached: bool = False
 
     # Search mode - determines post-download processing behavior
     # See SearchMode enum for behavioral differences
@@ -136,6 +173,14 @@ class DownloadTask:
         default_factory=dict
     )  # Per-output parameters (e.g. email recipient)
 
+    # Multi-book packs: one release holding several books. `book_plan` is the split the
+    # user approved before download (list of {title, series_position, year, files});
+    # `multi_book` asks post-processing to split heuristically when no plan exists.
+    multi_book: bool = False
+    book_plan: list[dict[str, Any]] | None = None
+    # Release-relative paths the user chose to skip in the pack review.
+    ignored_files: list[str] | None = None
+
     # User association (multi-user support)
     user_id: int | None = None  # DB user ID who queued this download
     username: str | None = None  # Username for {User} template variable
@@ -147,9 +192,19 @@ class DownloadTask:
     progress: float = 0.0
     status: QueueStatus = QueueStatus.QUEUED
     status_message: str | None = None
+    # When the task first reached a terminal status (epoch seconds, like added_time); None
+    # while it is running or queued again. Mirrors history's terminal_at for a live entry.
+    finished_at: float | None = None
     download_path: str | None = None
+    # Every file the output step produced, download_path among them. Kept in memory
+    # only: history persists download_path alone.
+    download_paths: list[str] = field(default_factory=list)
     last_error_message: str | None = None
     last_error_type: str | None = None
+
+    # True while the download client has this task's torrent in its own queue, waiting for a
+    # free slot. Such a task does no work yet, so it does not count against its source's limit.
+    client_queued: bool = False
     staged_path: str | None = None
 
     def __lt__(self, other: DownloadTask) -> bool:

@@ -5,6 +5,8 @@ yet, so widening the default alone would have reached fresh installs only - exac
 the installs already carrying the narrow m4b/mp3 list that loses FLAC/OPUS releases.
 """
 
+from __future__ import annotations
+
 import logging
 
 import pytest

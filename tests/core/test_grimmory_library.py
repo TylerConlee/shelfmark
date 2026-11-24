@@ -1,5 +1,7 @@
 """Tests for conservative Grimmory library identity matching."""
 
+from __future__ import annotations
+
 from shelfmark.core import grimmory_library
 
 

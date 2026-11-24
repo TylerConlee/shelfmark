@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from shelfmark.core.models import DownloadTask
+from shelfmark.core.models import DownloadTask, QueueStatus
 
 
 @pytest.fixture(scope="module")
@@ -538,6 +538,7 @@ class TestRetryDownloadEndpointGuardrails:
             size="1 MB",
             preview=None,
             content_type="ebook",
+            downloads=None,
             origin="direct",
             retry_payload=retry_payload,
         )
@@ -686,7 +687,7 @@ class TestRetryDownloadEndpointGuardrails:
                 with patch.object(
                     main_module.backend.book_queue,
                     "get_task_status",
-                    return_value=main_module.QueueStatus.ERROR,
+                    return_value=QueueStatus.ERROR,
                 ):
                     with patch.object(
                         main_module.backend, "retry_download", return_value=(True, None)
@@ -733,6 +734,7 @@ class TestRetryDownloadEndpointGuardrails:
             size="1 MB",
             preview=None,
             content_type="ebook",
+            downloads=None,
             origin="requested",
             retry_payload=retry_payload,
         )
@@ -856,6 +858,34 @@ class TestStatusEndpointGuardrails:
 
         assert resp.status_code == 200
         assert observed["user_id"] is None
+
+
+class TestErrorTextStaysOutOfResponses:
+    """A failing status or config read must not hand the exception text to the caller."""
+
+    def test_status_failure_returns_a_fixed_message(self, main_module, client):
+        def boom(user_id=None):
+            msg = "cannot open /srv/shelfmark/queue.db"
+            raise OSError(msg)
+
+        with patch.object(main_module, "get_auth_mode", return_value="none"):
+            with patch.object(main_module.backend, "queue_status", side_effect=boom):
+                resp = client.get("/api/status")
+
+        assert resp.status_code == 500
+        assert resp.get_json() == {"error": "Could not read the download status"}
+
+    def test_config_failure_returns_a_fixed_message(self, main_module, client):
+        def boom(*_args, **_kwargs):
+            msg = "cannot read /config/plugins/general.json"
+            raise OSError(msg)
+
+        with patch.object(main_module, "get_auth_mode", return_value="none"):
+            with patch.object(main_module, "get_session_db_user_id", side_effect=boom):
+                resp = client.get("/api/config")
+
+        assert resp.status_code == 500
+        assert resp.get_json() == {"error": "Could not load the configuration"}
 
 
 class TestQueueManagementEndpointGuardrails:

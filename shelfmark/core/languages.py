@@ -7,6 +7,8 @@ out the other side, so the aliases live in one place (``data/book-languages.json
 and adding a language means editing one file.
 """
 
+from __future__ import annotations
+
 import json
 import threading
 import unicodedata
@@ -56,7 +58,7 @@ def _load() -> tuple[dict[str, str], dict[str, str]]:
 
         try:
             raw = json.loads(LANGUAGE_DATA_PATH.read_text(encoding="utf-8"))
-        except OSError, ValueError:
+        except (OSError, ValueError):
             logger.exception("Failed to load language data from %s", LANGUAGE_DATA_PATH)
             raw = []
 

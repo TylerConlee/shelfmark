@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from shelfmark.metadata_providers import MetadataSearchOptions, SearchResult
 from shelfmark.metadata_providers.hardcover import HardcoverProvider
 

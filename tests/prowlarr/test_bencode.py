@@ -2,6 +2,8 @@
 Tests for bencode encoding/decoding in the torrent utilities.
 """
 
+from __future__ import annotations
+
 from shelfmark.download.clients.torrent_utils import (
     bencode_decode as _bencode_decode,
 )

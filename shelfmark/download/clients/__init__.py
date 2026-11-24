@@ -9,7 +9,8 @@ This module provides:
 Clients register themselves via the @register_client decorator.
 """
 
-import logging
+from __future__ import annotations
+
 import os
 import random
 import time
@@ -23,10 +24,12 @@ from typing import TYPE_CHECKING, TypeVar, cast
 
 import requests
 
+from shelfmark.core.logger import setup_logger
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_logger = logging.getLogger(__name__)
+_logger = setup_logger(__name__)
 
 # Type variable for generic return type
 T = TypeVar("T")
@@ -48,6 +51,8 @@ def with_retry(
     base_delay: float = 1.0,
     max_delay: float = 10.0,
     jitter: float = 0.5,
+    *,
+    extra_exceptions: tuple[type[Exception], ...] = (),
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Retry API calls with exponential backoff.
 
@@ -56,6 +61,7 @@ def with_retry(
         base_delay: Initial delay in seconds (default 1.0)
         max_delay: Maximum delay cap in seconds (default 10.0)
         jitter: Random jitter factor 0-1 to add to delay (default 0.5)
+        extra_exceptions: Client-library exceptions that also allow a retry
 
     Retries on:
         - Connection errors
@@ -67,6 +73,8 @@ def with_retry(
         - Other exceptions (programming errors)
 
     """
+
+    retryable_exceptions = RETRYABLE_EXCEPTIONS + extra_exceptions
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
@@ -81,7 +89,7 @@ def with_retry(
                     if e.response is not None and e.response.status_code < _MIN_RETRYABLE_STATUS:
                         raise
                     last_exception = e
-                except RETRYABLE_EXCEPTIONS as e:
+                except retryable_exceptions as e:
                     last_exception = e
 
                 if attempt < max_attempts:
@@ -135,6 +143,9 @@ class DownloadStatus:
     file_path: str | None  # Path in client's download dir (when complete)
     download_speed: int | None = None  # Bytes per second
     eta: int | None = None  # Seconds remaining
+    seeders: int | None = None  # Seeds connected right now (torrent clients that report it)
+    swarm_seeders: int | None = None  # Seeds the tracker says exist, connected or not
+    peers: int | None = None  # Other peers connected right now
 
     @classmethod
     def error(cls, message: str) -> DownloadStatus:
@@ -175,6 +186,14 @@ class DownloadStatus:
         return self.state
 
 
+@dataclass(frozen=True)
+class ExpectedFile:
+    """A file the client will have on disk when a download is complete."""
+
+    name: str  # Path relative to the client's save directory, "/" separated
+    size: int  # Final size in bytes
+
+
 class DownloadClient(ABC):
     """Base class for external download clients.
 
@@ -190,6 +209,10 @@ class DownloadClient(ABC):
     # Class attributes that subclasses must define
     protocol: str
     name: str
+    handoff_only = False
+    prefers_torrent_file = False
+    # False when remove(delete_files=True) always fails, as on rTorrent.
+    can_delete_files = True
 
     def _log_error(self, method: str, e: Exception, level: str = "error") -> str:
         """Log a client error with consistent formatting.
@@ -350,6 +373,15 @@ class DownloadClient(ABC):
 
         """
 
+    def get_expected_files(self, download_id: str) -> list[ExpectedFile] | None:
+        """The files a finished download holds, or None when the client cannot say.
+
+        Lets the handler tell a folder that has all of its files from one that stopped changing
+        while a sync to this host is still copying them in. Only files the client downloads
+        count: a file the user skipped is not expected. Default: the client cannot say.
+        """
+        return None
+
     def find_existing(
         self, url: str, category: str | None = None
     ) -> tuple[str, DownloadStatus] | None:
@@ -375,12 +407,15 @@ _CLIENTS: dict[str, list[type[DownloadClient]]] = {}
 ClientType = TypeVar("ClientType", bound=DownloadClient)
 _BUILTIN_CLIENT_MODULES = (
     "shelfmark.download.clients.alldebrid",
+    "shelfmark.download.clients.blackhole",
+    "shelfmark.download.clients.debridlink",
     "shelfmark.download.clients.deluge",
     "shelfmark.download.clients.nzbget",
     "shelfmark.download.clients.qbittorrent",
     "shelfmark.download.clients.realdebrid",
     "shelfmark.download.clients.rtorrent",
     "shelfmark.download.clients.sabnzbd",
+    "shelfmark.download.clients.torbox",
     "shelfmark.download.clients.transmission",
 )
 _builtin_client_state = {"loaded": False}
@@ -465,6 +500,15 @@ def list_configured_clients() -> list[str]:
                 result.append(protocol)
                 break
     return result
+
+
+def client_prefers_torrent_file(protocol: str) -> bool:
+    """Whether the active client needs a fetched .torrent file instead of a magnet."""
+    _ensure_builtin_clients_registered()
+    return any(
+        client_cls.prefers_torrent_file and client_cls.is_configured()
+        for client_cls in _CLIENTS.get(protocol, [])
+    )
 
 
 def get_all_clients() -> dict[str, list[type[DownloadClient]]]:

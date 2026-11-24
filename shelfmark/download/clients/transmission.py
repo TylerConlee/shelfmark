@@ -9,18 +9,22 @@ import importlib
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
+from transmission_rpc.error import TransmissionConnectError
+
 from shelfmark.core.config import config
 from shelfmark.core.logger import setup_logger
 from shelfmark.download.clients import (
     DownloadClient,
     DownloadStatus,
     register_client,
+    with_retry,
 )
 from shelfmark.download.clients._coercion import (
     coerce_optional_float,
     coerce_optional_int,
     config_text,
     normalize_http_config_url,
+    resolve_download_dir,
 )
 from shelfmark.download.clients.torrent_utils import (
     extract_torrent_info,
@@ -35,6 +39,8 @@ except ImportError:
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from transmission_rpc import Torrent
 
 logger = setup_logger(__name__)
 
@@ -188,6 +194,13 @@ class TransmissionClient(DownloadClient):
         _apply_transmission_ssl_verify(self._client, url)
         self._category = config_text(config.get("TRANSMISSION_CATEGORY", "books"))
         self._download_dir = config_text(config.get("TRANSMISSION_DOWNLOAD_DIR", ""))
+        self._separate_download_dirs = bool(
+            config.get("TRANSMISSION_SEPARATE_DOWNLOAD_DIRS", False)
+        )
+        self._download_dir_book = config_text(config.get("TRANSMISSION_DOWNLOAD_DIR_BOOK", ""))
+        self._download_dir_audiobook = config_text(
+            config.get("TRANSMISSION_DOWNLOAD_DIR_AUDIOBOOK", "")
+        )
 
     @staticmethod
     def is_configured() -> bool:
@@ -238,8 +251,15 @@ class TransmissionClient(DownloadClient):
 
             if resolved_category:
                 add_kwargs["labels"] = [resolved_category]
-            if self._download_dir:
-                add_kwargs["download_dir"] = self._download_dir
+            download_dir = resolve_download_dir(
+                separate=self._separate_download_dirs,
+                shared_dir=self._download_dir,
+                book_dir=self._download_dir_book,
+                audiobook_dir=self._download_dir_audiobook,
+                content_type=kwargs.get("content_type"),
+            )
+            if download_dir:
+                add_kwargs["download_dir"] = download_dir
 
             if torrent_info.torrent_data:
                 torrent = self._client.add_torrent(
@@ -279,6 +299,11 @@ class TransmissionClient(DownloadClient):
         else:
             return torrent_hash
 
+    @with_retry(extra_exceptions=(TransmissionConnectError,))
+    def _get_torrent(self, download_id: str) -> Torrent:
+        """Allow transient RPC outages to recover before reporting a failed download."""
+        return self._client.get_torrent(download_id)
+
     def get_status(self, download_id: str) -> DownloadStatus:
         """Get torrent status by hash.
 
@@ -290,7 +315,7 @@ class TransmissionClient(DownloadClient):
 
         """
         try:
-            torrent = self._client.get_torrent(download_id)
+            torrent = self._get_torrent(download_id)
 
             # Transmission status values:
             # 0: stopped

@@ -1,5 +1,7 @@
 """Unit tests for the Newznab download handler."""
 
+from __future__ import annotations
+
 from threading import Event
 from unittest.mock import patch
 
@@ -83,6 +85,17 @@ class TestGetDownloadUrl:
             "magnetUrl": "magnet:?xt=urn:btih:abc",
         }
         assert _get_download_url(result) == "magnet:?xt=urn:btih:abc"
+
+    def test_blackhole_prefers_torrent_file(self):
+        result = {
+            "protocol": "torrent",
+            "downloadUrl": "https://example.com/file.torrent",
+            "magnetUrl": "magnet:?xt=urn:btih:abc",
+        }
+        assert (
+            _get_download_url(result, prefer_torrent_file=True)
+            == "https://example.com/file.torrent"
+        )
 
     def test_falls_back_to_download_url_when_no_magnet(self):
         result = {

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from shelfmark.metadata_providers.hardcover import (
     TITLE_SUGGESTION_FIELDS,
     TITLE_SUGGESTION_WEIGHTS,

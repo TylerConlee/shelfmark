@@ -5,6 +5,8 @@ from the Calibre Moly_hu plugin by Hoffer Csaba, Kloon, otapi, Dezso, Hokutya,
 seeder and contributors (GPL v3, mobileread.com).
 """
 
+from __future__ import annotations
+
 import re
 import threading
 import time

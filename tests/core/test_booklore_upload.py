@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from unittest.mock import MagicMock, patch
 
 from shelfmark.download.outputs.booklore import (

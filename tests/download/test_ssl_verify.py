@@ -1,5 +1,7 @@
 """Tests for certificate validation / SSL verify utilities."""
 
+from __future__ import annotations
+
 import warnings
 
 import pytest

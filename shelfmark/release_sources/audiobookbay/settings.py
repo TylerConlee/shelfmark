@@ -1,5 +1,7 @@
 """AudiobookBay settings registration."""
 
+from __future__ import annotations
+
 from shelfmark.core.settings_registry import (
     CheckboxField,
     NumberField,
@@ -42,6 +44,24 @@ def audiobookbay_config_settings() -> list[SettingsField]:
             key="ABB_EXACT_PHRASE",
             label="Prefer Exact-Phrase Search",
             description="Wrap generated queries in quotes for stricter matching. If no results are found, Shelfmark retries without quotes.",
+            show_when={"field": "ABB_ENABLED", "value": True},
+        ),
+        NumberField(
+            key="ABB_SEED_TIME_MINUTES",
+            label="Seed Time (minutes)",
+            description="How long a finished AudiobookBay torrent keeps seeding before the client stops it. 0 uses the torrent client's own limit.",
+            default=0,
+            min_value=0,
+            max_value=525600,
+            show_when={"field": "ABB_ENABLED", "value": True},
+        ),
+        NumberField(
+            key="ABB_SEED_RATIO",
+            label="Seed Ratio",
+            description="Share ratio an AudiobookBay torrent should reach before the client stops it. 0 uses the torrent client's own limit.",
+            default=0.0,
+            min_value=0.0,
+            max_value=100.0,
             show_when={"field": "ABB_ENABLED", "value": True},
         ),
         NumberField(

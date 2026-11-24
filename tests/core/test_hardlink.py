@@ -11,6 +11,8 @@ Two approaches to preserve torrent files for seeding:
    - More efficient but requires same filesystem
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 import tempfile

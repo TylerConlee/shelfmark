@@ -1,5 +1,7 @@
 """Tests for the Z-Library 503 cookie handshake."""
 
+from __future__ import annotations
+
 import requests
 
 

@@ -2,6 +2,8 @@
 Tests for AudiobookBay utility functions.
 """
 
+from __future__ import annotations
+
 from shelfmark.release_sources.audiobookbay.utils import normalize_search_punctuation, parse_size
 
 

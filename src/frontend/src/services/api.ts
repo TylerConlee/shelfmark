@@ -12,6 +12,8 @@ import type {
   RequestSubmissionResult,
   MetadataProvidersResponse,
   MetadataSearchConfig,
+  PackBook,
+  InspectReleaseResponse,
 } from '../types';
 import type {
   ActionResult,
@@ -82,6 +84,9 @@ type ApiResponseErrorShape = Error & {
   code?: string;
   requiredMode?: string;
   payload?: Record<string, unknown>;
+  // Set only when the server explained itself, so callers can tell a real explanation
+  // apart from the `503 SERVICE UNAVAILABLE` placeholder built from the status line.
+  serverMessage?: string;
 };
 
 class ApiResponseError extends Error {
@@ -89,6 +94,7 @@ class ApiResponseError extends Error {
   code?: string;
   requiredMode?: string;
   payload?: Record<string, unknown>;
+  serverMessage?: string;
 
   constructor(
     message: string,
@@ -97,6 +103,7 @@ class ApiResponseError extends Error {
       code?: string;
       requiredMode?: string;
       payload?: Record<string, unknown>;
+      serverMessage?: string;
     },
   ) {
     super(message);
@@ -105,11 +112,19 @@ class ApiResponseError extends Error {
     this.code = params.code;
     this.requiredMode = params.requiredMode;
     this.payload = params.payload;
+    this.serverMessage = params.serverMessage;
   }
 }
 
 export const isApiResponseError = (error: unknown): error is ApiResponseErrorShape => {
   return error instanceof ApiResponseError;
+};
+
+// The client gave up before the server answered. Distinguishable so callers can report
+// the wait rather than guessing at a cause: a search that hits this has told us nothing
+// about the network or the mirrors, and saying it did is what issue #1285 was about.
+export const isTimeoutError = (error: unknown): error is Error => {
+  return error instanceof TimeoutError;
 };
 
 const mapApiErrorToActionResult = (error: unknown): ActionResult | null => {
@@ -147,7 +162,31 @@ const DEFAULT_TIMEOUT_MS = 30000;
 // Release searches can be long-running: a source behind Cloudflare/DDoS-Guard has
 // to spin up the bypasser and solve the challenge before any results come back,
 // which routinely takes well over the default timeout.
-const SEARCH_TIMEOUT_MS = 180000;
+//
+// The server bounds them itself (RELEASE_SEARCH_TIMEOUT, reported by /api/config) and
+// answers a spent budget with a message naming the real cause. This client abort is only
+// the backstop for a server that never answers at all, so it has to fire *after* the
+// server's own deadline - a fixed 180s here beat the 300s default, so the accurate
+// message was never reachable and raising the setting did nothing. See issue #1285.
+//
+// The margin has to cover what the server still has to do *after* its budget trips, not
+// just the budget itself. The deadline is cooperative: it is handed to the bypasser as a
+// cancel flag, and internal_bypasser._CDP_UNWIND_GRACE_SECONDS allows 15s on its own for a
+// cancelled solve to close its browser - before the handler has serialized releases, built
+// the column config and put bytes on the wire. A 15s margin is entirely spent by that
+// unwind, so give it room for the unwind plus the response.
+const SEARCH_TIMEOUT_MARGIN_MS = 45000;
+const FALLBACK_SEARCH_TIMEOUT_MS = 300000; // search_deadline.DEFAULT_SEARCH_BUDGET_SECONDS
+let searchTimeoutMs = FALLBACK_SEARCH_TIMEOUT_MS + SEARCH_TIMEOUT_MARGIN_MS;
+
+// Exported for tests; callers get this applied automatically via getConfig().
+export const setSearchTimeoutFromConfig = (budgetSeconds: unknown): void => {
+  if (typeof budgetSeconds === 'number' && Number.isFinite(budgetSeconds) && budgetSeconds > 0) {
+    searchTimeoutMs = budgetSeconds * 1000 + SEARCH_TIMEOUT_MARGIN_MS;
+  }
+};
+
+export const getSearchTimeoutMs = (): number => searchTimeoutMs;
 
 // Utility function for JSON fetch with credentials and timeout
 async function fetchJSON<T>(
@@ -181,12 +220,15 @@ async function fetchJSON<T>(
         if (isRecord(parsed) && !Array.isArray(parsed)) {
           errorData = parsed;
         }
-        // Prefer user-friendly 'message' field, fall back to 'error'
-        if (typeof errorData?.message === 'string') {
-          errorMessage = errorData.message;
-          hasServerMessage = true;
-        } else if (typeof errorData?.error === 'string') {
-          errorMessage = errorData.error;
+        // Prefer user-friendly 'message' field, fall back to 'error'. Both must carry
+        // actual text: an empty string is not the server explaining itself, and treating
+        // it as one suppresses the placeholder below and shows the user a blank toast.
+        const explanation = [errorData?.message, errorData?.error].find(
+          (candidate): candidate is string =>
+            typeof candidate === 'string' && candidate.trim() !== '',
+        );
+        if (explanation !== undefined) {
+          errorMessage = explanation;
           hasServerMessage = true;
         }
       } catch (e) {
@@ -211,6 +253,7 @@ async function fetchJSON<T>(
 
       throw new ApiResponseError(errorMessage, {
         status: res.status,
+        serverMessage: hasServerMessage ? errorMessage : undefined,
         code: typeof errorData?.code === 'string' ? errorData.code : undefined,
         requiredMode:
           typeof errorData?.required_mode === 'string' ? errorData.required_mode : undefined,
@@ -236,14 +279,20 @@ async function fetchJSON<T>(
 }
 
 // API functions
-export const searchBooks = async (query: string): Promise<Book[]> => {
-  if (!query) return [];
+export const searchBooks = async (
+  query: string,
+): Promise<{ books: Book[]; totalResults: number | string | null }> => {
+  if (!query) return { books: [], totalResults: null };
   const response = await fetchJSON<ReleasesResponse>(
     `${API_BASE}/releases?source=direct_download&${query}`,
     {},
-    SEARCH_TIMEOUT_MS,
+    searchTimeoutMs,
   );
-  return response.releases.map(transformReleaseToDirectBook);
+  // Extract total count from search_info if available
+  const firstSource = response.sources_searched?.[0];
+  const searchInfo = firstSource ? response.search_info?.[firstSource] : undefined;
+  const totalResults = searchInfo?.total_results ?? null;
+  return { books: response.releases.map(transformReleaseToDirectBook), totalResults };
 };
 
 // Metadata search response type (internal)
@@ -497,6 +546,7 @@ export type DownloadReleasePayload = {
   format?: string;
   size?: string;
   size_bytes?: number;
+  downloads?: number;
   download_url?: string;
   protocol?: string;
   indexer?: string;
@@ -513,6 +563,19 @@ export type DownloadReleasePayload = {
   isbn_10?: string;
   isbn_13?: string;
   authors?: string[];
+  multi_book?: boolean; // Split a multi-book pack into one book per subfolder/file
+  book_plan?: PackBook[]; // The split the user approved before download
+  ignored_files?: string[]; // Pack files the user chose to skip
+};
+
+/** Inspect a release's file list before download (same body as downloadRelease). */
+export const inspectRelease = async (
+  release: DownloadReleasePayload,
+): Promise<InspectReleaseResponse> => {
+  return fetchJSON<InspectReleaseResponse>(`${API_BASE}/releases/inspect`, {
+    method: 'POST',
+    body: JSON.stringify(release),
+  });
 };
 
 export const downloadRelease = async (
@@ -592,7 +655,9 @@ export const retryDownload = async (id: string): Promise<void> => {
 };
 
 export const getConfig = async (): Promise<AppConfig> => {
-  return fetchJSON<AppConfig>(API.config);
+  const config = await fetchJSON<AppConfig>(API.config);
+  setSearchTimeoutFromConfig(config.release_search_timeout);
+  return config;
 };
 
 interface ActivityDismissedItem {
@@ -659,6 +724,35 @@ export const rejectAdminRequest = async (
   body: RejectAdminRequestBody = {},
 ): Promise<RequestRecord> => {
   return fetchJSON<RequestRecord>(buildAdminRequestActionUrl(API.adminRequests, id, 'reject'), {
+    method: 'POST',
+    body: JSON.stringify(buildRejectAdminRequestBody(body)),
+  });
+};
+
+export const listRejectedAdminRequests = async (): Promise<RequestRecord[]> => {
+  return fetchJSON<RequestRecord[]>(`${API.adminRequests}?status=rejected`);
+};
+
+/** Ids of the rejected requests hidden from the admin Rejected view; empty when the field is missing. */
+export const listHiddenRejectedRequestIds = async (): Promise<number[]> => {
+  const response = await fetchJSON<{ request_ids: number[] }>(
+    `${API.adminRequests}/rejected-hidden`,
+  );
+  return Array.isArray(response.request_ids) ? response.request_ids : [];
+};
+
+export const setRejectedRequestHidden = async (id: number, hidden: boolean): Promise<void> => {
+  await fetchJSON(`${API.adminRequests}/${encodeURIComponent(String(id))}/rejected-hidden`, {
+    method: 'POST',
+    body: JSON.stringify({ hidden }),
+  });
+};
+
+export const reopenAdminRequest = async (
+  id: number,
+  body: RejectAdminRequestBody = {},
+): Promise<RequestRecord> => {
+  return fetchJSON<RequestRecord>(buildAdminRequestActionUrl(API.adminRequests, id, 'reopen'), {
     method: 'POST',
     body: JSON.stringify(buildRejectAdminRequestBody(body)),
   });
@@ -816,9 +910,9 @@ export const getReleases = async (
 
 // Admin user management API
 
-export type AdminAuthSource = 'builtin' | 'oidc' | 'proxy' | 'cwa';
+type AdminAuthSource = 'builtin' | 'oidc' | 'proxy' | 'cwa';
 
-export interface AdminUserEditCapabilities {
+interface AdminUserEditCapabilities {
   authSource: AdminAuthSource;
   canSetPassword: boolean;
   canEditRole: boolean;
@@ -926,6 +1020,8 @@ export interface DeliveryPreferencesResponse {
   globalValues: Record<string, unknown>;
   userOverrides: Record<string, unknown>;
   effective: Record<string, { value: unknown; source: string }>;
+  // Self-service payloads only: an admin default notification route exists (its URL is not sent).
+  adminDefaultRoutesSet?: boolean;
 }
 
 export const getAdminDeliveryPreferences = async (
@@ -1021,6 +1117,7 @@ export const getSelfUserEditContext = async (): Promise<SelfUserEditContext> => 
 export const updateSelfUser = async (
   data: Partial<Pick<AdminUser, 'email' | 'display_name'>> & {
     password?: string;
+    current_password?: string;
     settings?: Record<string, unknown>;
   },
 ): Promise<AdminUser> => {

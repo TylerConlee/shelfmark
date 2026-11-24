@@ -3,6 +3,8 @@
 Registers IRC settings for the settings UI.
 """
 
+from __future__ import annotations
+
 from shelfmark.core.settings_registry import (
     ActionButton,
     CheckboxField,

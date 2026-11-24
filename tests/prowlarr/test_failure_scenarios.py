@@ -7,6 +7,8 @@ They use real clients where possible, with injected failures for edge cases.
 Run with: uv run pytest tests/prowlarr/test_failure_scenarios.py -v
 """
 
+from __future__ import annotations
+
 import tempfile
 import time
 from pathlib import Path

@@ -7,6 +7,8 @@ Requires Prowlarr and a download client (qBittorrent, Transmission, etc.) to be 
 Run with: uv run pytest tests/e2e/test_prowlarr_flow.py -v -m e2e
 """
 
+from __future__ import annotations
+
 import pytest
 
 from .conftest import (

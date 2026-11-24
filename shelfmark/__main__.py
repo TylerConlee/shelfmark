@@ -1,5 +1,7 @@
 """Package entry point for `python -m shelfmark`."""
 
+from __future__ import annotations
+
 from shelfmark.config.env import FLASK_HOST, FLASK_PORT
 from shelfmark.core.config import config
 from shelfmark.main import app, socketio

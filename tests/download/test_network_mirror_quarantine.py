@@ -7,6 +7,8 @@ NXDOMAINs, refuses the connection, or answers 200 with a parking page is not a m
 at all and must never be tried again this session.
 """
 
+from __future__ import annotations
+
 import requests
 
 

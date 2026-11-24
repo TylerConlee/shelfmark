@@ -4,6 +4,8 @@ Tests for the Prowlarr source module.
 Tests the utility functions for parsing release metadata.
 """
 
+from __future__ import annotations
+
 # Import the functions to test
 import pytest
 import requests
@@ -17,14 +19,16 @@ from shelfmark.release_sources.prowlarr.source import (
     _build_indexer_priority,
     _collapse_duplicate_indexer_results,
     _detect_content_type_from_categories,
+    _drop_unknown_indexer_ids,
     _extract_format,
     _extract_mam_language,
     _fetch_indexer_seed_settings,
     _last_known_seed_settings,
-    _parse_size,
     _release_identity,
     _result_dedup_key,
     _search_budget_seconds,
+    _unsupported_title_extension,
+    parse_size,
 )
 from shelfmark.release_sources.prowlarr.utils import (
     build_source_id,
@@ -48,45 +52,45 @@ def source_available_by_default(monkeypatch):
 
 
 class TestParseSize:
-    """Tests for the _parse_size function."""
+    """Tests for the parse_size function."""
 
     def test_parse_size_bytes(self):
         """Test parsing small byte sizes."""
-        assert _parse_size(100) == "100 B"
-        assert _parse_size(512) == "512 B"
+        assert parse_size(100) == "100 B"
+        assert parse_size(512) == "512 B"
 
     def test_parse_size_kilobytes(self):
         """Test parsing kilobyte sizes."""
-        assert _parse_size(1024) == "1.0 KB"
-        assert _parse_size(2048) == "2.0 KB"
-        assert _parse_size(1536) == "1.5 KB"
+        assert parse_size(1024) == "1.0 KB"
+        assert parse_size(2048) == "2.0 KB"
+        assert parse_size(1536) == "1.5 KB"
 
     def test_parse_size_megabytes(self):
         """Test parsing megabyte sizes."""
-        assert _parse_size(1048576) == "1.0 MB"
-        assert _parse_size(5242880) == "5.0 MB"
-        assert _parse_size(1572864) == "1.5 MB"
+        assert parse_size(1048576) == "1.0 MB"
+        assert parse_size(5242880) == "5.0 MB"
+        assert parse_size(1572864) == "1.5 MB"
 
     def test_parse_size_gigabytes(self):
         """Test parsing gigabyte sizes."""
-        assert _parse_size(1073741824) == "1.0 GB"
-        assert _parse_size(2147483648) == "2.0 GB"
+        assert parse_size(1073741824) == "1.0 GB"
+        assert parse_size(2147483648) == "2.0 GB"
 
     def test_parse_size_terabytes(self):
         """Test parsing terabyte sizes."""
-        assert _parse_size(1099511627776) == "1.0 TB"
+        assert parse_size(1099511627776) == "1.0 TB"
 
     def test_parse_size_none(self):
         """Test that None returns None."""
-        assert _parse_size(None) is None
+        assert parse_size(None) is None
 
     def test_parse_size_zero(self):
         """Test that zero returns None."""
-        assert _parse_size(0) is None
+        assert parse_size(0) is None
 
     def test_parse_size_negative(self):
         """Test that negative values return None."""
-        assert _parse_size(-100) is None
+        assert parse_size(-100) is None
 
 
 class TestExtractFormat:
@@ -1398,3 +1402,294 @@ class TestSearchBudgetScalesWithIndexerTimeout:
 
     def test_budget_stays_under_the_gunicorn_worker_timeout(self):
         assert _search_budget_seconds(300) == 240.0
+
+
+class TestSplitMamFormats:
+    """MAM's structured "[LANG / FORMATS]" bracket, split into known vs unknown tokens."""
+
+    def test_recognized_only(self):
+        from shelfmark.release_sources.prowlarr.source import _split_mam_formats
+
+        assert _split_mam_formats("Title by Author [ENG / EPUB MOBI]") == (["epub", "mobi"], [])
+
+    def test_unrecognized_only_is_surfaced(self):
+        from shelfmark.release_sources.prowlarr.source import _split_mam_formats
+
+        assert _split_mam_formats("The Martian by Andy Weir [ENG / AVI]") == ([], ["avi"])
+
+    def test_mixed_keeps_both_sides(self):
+        from shelfmark.release_sources.prowlarr.source import _split_mam_formats
+
+        assert _split_mam_formats("Title [ENG / M4B AVI]") == (["m4b"], ["avi"])
+
+    def test_no_structured_bracket(self):
+        from shelfmark.release_sources.prowlarr.source import _split_mam_formats
+
+        assert _split_mam_formats("Title [VIP]") == ([], [])
+        assert _split_mam_formats("") == ([], [])
+
+    def test_extract_mam_formats_still_returns_recognized(self):
+        from shelfmark.release_sources.prowlarr.source import _extract_mam_formats
+
+        assert _extract_mam_formats("Title [ENG / MP3]") == ["mp3"]
+        assert _extract_mam_formats("Title [ENG / AVI]") == []
+
+
+class TestUnrecognizedFormatOnRelease:
+    def _result(self, title: str) -> dict:
+        return {
+            "title": title,
+            "guid": "https://www.myanonamouse.net/t/627978",
+            "indexer": "MyAnonamouse",
+            "indexerId": 1,
+            "protocol": "torrent",
+            "size": 320000000,
+            "seeders": 800,
+            "leechers": 0,
+            "categories": [{"id": 3030}],
+        }
+
+    def test_unrecognized_format_lands_in_extra(self):
+        from shelfmark.release_sources.prowlarr.source import _prowlarr_result_to_release
+
+        release = _prowlarr_result_to_release(
+            self._result("The Martian by Andy Weir [ENG / AVI]"),
+            "audiobook",
+            enable_format_detection=True,
+        )
+        assert release.format is None
+        assert release.extra["formats"] is None
+        assert release.extra["unrecognized_formats"] == ["avi"]
+
+    def test_recognized_format_leaves_unrecognized_empty(self):
+        from shelfmark.release_sources.prowlarr.source import _prowlarr_result_to_release
+
+        release = _prowlarr_result_to_release(
+            self._result("The Martian by Andy Weir [ENG / M4B]"),
+            "audiobook",
+            enable_format_detection=True,
+        )
+        assert release.format == "m4b"
+        assert release.extra["unrecognized_formats"] is None
+
+    def test_not_populated_without_format_detection(self):
+        from shelfmark.release_sources.prowlarr.source import _prowlarr_result_to_release
+
+        release = _prowlarr_result_to_release(
+            self._result("The Martian by Andy Weir [ENG / AVI]"), "audiobook"
+        )
+        assert release.extra["unrecognized_formats"] is None
+
+
+class TestProwlarrStaleIndexerSelection:
+    """Indexers removed or disabled in Prowlarr must not be searched (#1283)."""
+
+    def test_drop_unknown_indexer_ids_keeps_only_live_indexers(self):
+        assert _drop_unknown_indexer_ids([1, 99], [{"id": 1}, {"id": 2}]) == [1]
+
+    def test_drop_unknown_indexer_ids_leaves_search_all_alone(self):
+        assert _drop_unknown_indexer_ids(None, [{"id": 1}]) is None
+
+    def _search_with_selection(self, monkeypatch, selection):
+        import shelfmark.release_sources.prowlarr.source as prowlarr_source
+
+        def fake_get(key: str, default=None):
+            values = {
+                "PROWLARR_INDEXERS": selection,
+                "PROWLARR_AUTO_EXPAND": False,
+            }
+            return values.get(key, default)
+
+        monkeypatch.setattr(prowlarr_source.config, "get", fake_get)
+
+        class RecordingClient(FakeTorznabClient):
+            def __init__(self):
+                super().__init__()
+                self.searched_indexer_ids: list[int] = []
+
+            def torznab_search(self, *, indexer_id: int, **kwargs):
+                self.searched_indexer_ids.append(indexer_id)
+                return super().torznab_search(indexer_id=indexer_id, **kwargs)
+
+        fake_client = RecordingClient()
+        source = ProwlarrSource()
+        monkeypatch.setattr(source, "_get_client", lambda: fake_client)
+
+        book = BookMetadata(
+            provider="hardcover",
+            provider_id="123",
+            title="Anything",
+            authors=["Someone"],
+        )
+
+        from shelfmark.core.search_plan import build_release_search_plan
+
+        plan = build_release_search_plan(book, languages=["en"], manual_query="my custom")
+        source.search(book, plan, content_type="ebook")
+        return fake_client
+
+    def test_search_skips_indexer_missing_from_prowlarr(self, monkeypatch):
+        # The fake Prowlarr only serves indexer 1; 99 was removed behind our back.
+        fake_client = self._search_with_selection(monkeypatch, [1, 99])
+
+        assert fake_client.searched_indexer_ids == [1]
+
+    def test_search_queries_nothing_when_every_selected_indexer_is_gone(self, monkeypatch):
+        fake_client = self._search_with_selection(monkeypatch, [98, 99])
+
+        assert fake_client.searched_indexer_ids == []
+
+
+class TestHideUnsupportedFormats:
+    """Plain indexer titles that end in a format the user did not enable are hidden."""
+
+    SUPPORTED = ["epub", "mobi", "azw3"]
+
+    def _patch_config(self, monkeypatch, overrides=None):
+        import shelfmark.release_sources.prowlarr.source as prowlarr_source
+
+        values = {
+            "PROWLARR_INDEXERS": "",
+            "PROWLARR_AUTO_EXPAND": False,
+            "SUPPORTED_FORMATS": self.SUPPORTED,
+            **(overrides or {}),
+        }
+        monkeypatch.setattr(
+            prowlarr_source.config, "get", lambda key, default=None: values.get(key, default)
+        )
+
+    @pytest.mark.parametrize(
+        ("title", "expected"),
+        [
+            ("Иван Вазов - Под игото.doc", "doc"),
+            ("Author - Title.RTF", "rtf"),
+            ("Author - Title.pdf ", "pdf"),
+            ("Author - Title.epub", None),
+            ("Author - Title [EPUB]", None),
+            ("Jane.Eyre.by.Bronte", None),
+            ("Author - Title.rar", None),
+            ("Author - Title.zip", None),
+            ("Author - Title", None),
+            ("", None),
+        ],
+    )
+    def test_unsupported_title_extension(self, monkeypatch, title, expected):
+        self._patch_config(monkeypatch)
+        assert _unsupported_title_extension(title, "ebook") == expected
+
+    def test_audiobook_searches_are_not_filtered(self, monkeypatch):
+        self._patch_config(monkeypatch)
+        assert _unsupported_title_extension("Author - Title.doc", "audiobook") is None
+
+    def test_comma_separated_supported_formats(self, monkeypatch):
+        self._patch_config(monkeypatch, {"SUPPORTED_FORMATS": "epub, doc"})
+        assert _unsupported_title_extension("Author - Title.doc", "ebook") is None
+        assert _unsupported_title_extension("Author - Title.rtf", "ebook") == "rtf"
+
+    def _search(self, monkeypatch, overrides=None):
+        self._patch_config(monkeypatch, overrides)
+        fake_client = FakeTorznabClient(
+            search_results=[
+                {
+                    "guid": f"result-{index}",
+                    "protocol": "torrent",
+                    "title": title,
+                    "magnetUrl": f"magnet:?xt=urn:btih:abc{index}",
+                    "indexerId": 1,
+                    "indexer": "Zamunda",
+                }
+                for index, title in enumerate(
+                    ["Иван Вазов - Под игото.epub", "Иван Вазов - Под игото.doc"]
+                )
+            ]
+        )
+        source = ProwlarrSource()
+        monkeypatch.setattr(source, "_get_client", lambda: fake_client)
+        book = BookMetadata(
+            provider="hardcover", provider_id="123", title="Под игото", authors=["Иван Вазов"]
+        )
+
+        from shelfmark.core.search_plan import build_release_search_plan
+
+        plan = build_release_search_plan(book, languages=["bg"])
+        return source.search(book, plan, content_type="ebook")
+
+    def test_search_hides_unsupported_format(self, monkeypatch):
+        releases = self._search(monkeypatch)
+        assert [release.title for release in releases] == ["Иван Вазов - Под игото.epub"]
+
+    def test_search_keeps_unsupported_format_when_disabled(self, monkeypatch):
+        releases = self._search(monkeypatch, {"PROWLARR_HIDE_UNSUPPORTED_FORMATS": False})
+        assert len(releases) == 2
+
+
+class TestEbookMaxSize:
+    """PROWLARR_EBOOK_MAX_SIZE_MB hides oversized ebook results and nothing else (#844)."""
+
+    INDEXER = 10
+    MB = 1024 * 1024
+
+    def _results(self, *sizes):
+        return {
+            self.INDEXER: [
+                {**_mam_result(self.INDEXER, "Indexer", f"guid-{n}"), "size": size}
+                for n, size in enumerate(sizes)
+            ]
+        }
+
+    def _search(self, monkeypatch, sizes, *, limit=None, content_type="ebook"):
+        import shelfmark.release_sources.prowlarr.source as prowlarr_source
+        from shelfmark.core.search_plan import build_release_search_plan
+
+        values = {"PROWLARR_INDEXERS": "", "PROWLARR_AUTO_EXPAND": False}
+        if limit is not None:
+            values["PROWLARR_EBOOK_MAX_SIZE_MB"] = limit
+        monkeypatch.setattr(
+            prowlarr_source.config, "get", lambda key, default=None: values.get(key, default)
+        )
+        source = ProwlarrSource()
+        monkeypatch.setattr(
+            source, "_get_client", lambda: _MultiIndexerClient(self._results(*sizes), None)
+        )
+        book = BookMetadata(
+            provider="hardcover", provider_id="123", title="Dune", authors=["Frank Herbert"]
+        )
+        plan = build_release_search_plan(book, languages=["en"])
+        return source.search(book, plan, content_type=content_type)
+
+    def test_no_limit_shows_everything(self, monkeypatch):
+        releases = self._search(monkeypatch, [5 * self.MB, 4000 * self.MB])
+
+        assert len(releases) == 2
+
+    def test_zero_is_no_limit(self, monkeypatch):
+        releases = self._search(monkeypatch, [5 * self.MB, 4000 * self.MB], limit=0)
+
+        assert len(releases) == 2
+
+    def test_a_result_over_the_limit_is_hidden(self, monkeypatch):
+        releases = self._search(monkeypatch, [5 * self.MB, 4000 * self.MB], limit=100)
+
+        assert [r.size_bytes for r in releases] == [5 * self.MB]
+
+    def test_a_result_exactly_at_the_limit_stays(self, monkeypatch):
+        releases = self._search(monkeypatch, [100 * self.MB, 100 * self.MB + 1], limit=100)
+
+        assert [r.size_bytes for r in releases] == [100 * self.MB]
+
+    def test_a_result_with_no_size_stays(self, monkeypatch):
+        releases = self._search(monkeypatch, [None, 0, 4000 * self.MB], limit=100)
+
+        assert len(releases) == 2
+
+    def test_audiobook_searches_are_not_limited(self, monkeypatch):
+        releases = self._search(
+            monkeypatch, [5 * self.MB, 4000 * self.MB], limit=100, content_type="audiobook"
+        )
+
+        assert len(releases) == 2
+
+    def test_a_bad_setting_is_no_limit(self, monkeypatch):
+        releases = self._search(monkeypatch, [5 * self.MB, 4000 * self.MB], limit="lots")
+
+        assert len(releases) == 2

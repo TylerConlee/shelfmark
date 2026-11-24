@@ -1,5 +1,7 @@
 """Tests for natural sort and sequential part number assignment."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from shelfmark.core.naming import assign_part_numbers, natural_sort_key

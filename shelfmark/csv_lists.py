@@ -121,7 +121,7 @@ def load_row_states(list_id: str) -> dict[str, dict[str, Any]]:
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return {}
     if not isinstance(payload, dict):
         return {}
@@ -262,7 +262,7 @@ def list_csv_lists() -> list[CsvListInfo]:
     for path in sorted(directory.glob("*.csv"), key=lambda item: item.name.casefold()):
         try:
             books = parse_csv_bytes(path.read_bytes())
-        except OSError, ValueError:
+        except (OSError, ValueError):
             continue
         lists.append(
             CsvListInfo(

@@ -5,8 +5,10 @@ import {
   LANGUAGE_OPTION_ALL,
   LANGUAGE_OPTION_DEFAULT,
   buildLanguageNormalizer,
+  getLanguageFilterValues,
   getReleaseSearchLanguageParams,
   releaseLanguageMatchesFilter,
+  resolveDefaultLanguageCodes,
 } from '../utils/languageFilters';
 
 const supportedLanguages: Language[] = [
@@ -65,5 +67,57 @@ describe('releaseLanguageMatchesFilter', () => {
     );
 
     expect(visibleLanguages).toHaveLength(48);
+  });
+
+  it('shows every release when the default language list is explicitly empty', () => {
+    // Issue 1384: an empty BOOK_LANGUAGE with the "Default" filter hid all releases.
+    const normalizer = buildLanguageNormalizer(supportedLanguages);
+    const defaults = resolveDefaultLanguageCodes([], supportedLanguages);
+    const selectedCodes =
+      getLanguageFilterValues([LANGUAGE_OPTION_DEFAULT], supportedLanguages, defaults) ?? defaults;
+
+    expect(releaseLanguageMatchesFilter('en', selectedCodes, normalizer)).toBe(true);
+    expect(releaseLanguageMatchesFilter('German', selectedCodes, normalizer)).toBe(true);
+    expect(releaseLanguageMatchesFilter('de, en', selectedCodes, normalizer)).toBe(true);
+  });
+
+  it('still filters by a configured default language', () => {
+    const normalizer = buildLanguageNormalizer(supportedLanguages);
+
+    expect(releaseLanguageMatchesFilter('en', ['en'], normalizer)).toBe(true);
+    expect(releaseLanguageMatchesFilter('de', ['en'], normalizer)).toBe(false);
+  });
+});
+
+describe('resolveDefaultLanguageCodes', () => {
+  it('keeps an explicitly empty default as "no default filter"', () => {
+    // The backend stores [] to mean "do not filter"; substituting the first
+    // supported language here would make the UI filter where the server does not.
+    expect(resolveDefaultLanguageCodes([], supportedLanguages)).toEqual([]);
+  });
+
+  it('leaves a configured default untouched', () => {
+    expect(resolveDefaultLanguageCodes(['de', 'hu'], supportedLanguages)).toEqual(['de', 'hu']);
+  });
+
+  it('falls back to the first supported language only when nothing is configured', () => {
+    expect(resolveDefaultLanguageCodes(undefined, supportedLanguages)).toEqual(['en']);
+    expect(resolveDefaultLanguageCodes(null, [])).toEqual(['en']);
+  });
+
+  it('sends no language filter when an empty default is the whole selection', () => {
+    const defaults = resolveDefaultLanguageCodes([], supportedLanguages);
+
+    expect(
+      getReleaseSearchLanguageParams([LANGUAGE_OPTION_DEFAULT], supportedLanguages, defaults),
+    ).toBe(undefined);
+  });
+
+  it('does not smuggle the first language into a Default+German selection', () => {
+    const defaults = resolveDefaultLanguageCodes([], supportedLanguages);
+
+    expect(
+      getReleaseSearchLanguageParams([LANGUAGE_OPTION_DEFAULT, 'de'], supportedLanguages, defaults),
+    ).toEqual(['de']);
   });
 });

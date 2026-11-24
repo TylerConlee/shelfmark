@@ -7,6 +7,8 @@ results body, which used to surface as "0 results". These tests pin the counts
 so a narrower field list cannot silently ship again.
 """
 
+from __future__ import annotations
+
 import pytest
 
 from shelfmark.metadata_providers.hardcover import (

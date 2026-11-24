@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 
 from shelfmark.core.cache import cache_key

@@ -1,5 +1,7 @@
 """Tests for request lifecycle validation helpers."""
 
+from __future__ import annotations
+
 import os
 import tempfile
 
@@ -24,6 +26,7 @@ from shelfmark.core.requests_service import (
     fulfil_request,
     reject_request,
     reopen_failed_request,
+    reopen_request,
     sync_delivery_states_from_queue_status,
 )
 from shelfmark.core.user_db import UserDB
@@ -581,15 +584,16 @@ def test_reopen_failed_request_reverts_to_pending_from_queued_and_clears_on_refu
 def test_reopen_failed_request_delegates_to_user_db_public_api():
     class StubUserDB:
         def __init__(self) -> None:
-            self.calls: list[tuple[int, str | None]] = []
+            self.calls: list[tuple[int, str | None, bool]] = []
 
         def reopen_failed_request(
             self,
             request_id: int,
             *,
             failure_reason: str | None = None,
+            remember_failed_release: bool = False,
         ) -> dict[str, object]:
-            self.calls.append((request_id, failure_reason))
+            self.calls.append((request_id, failure_reason, remember_failed_release))
             return {"id": request_id, "status": "pending"}
 
     user_db = StubUserDB()
@@ -602,7 +606,7 @@ def test_reopen_failed_request_delegates_to_user_db_public_api():
 
     assert reopened == {"id": 7, "status": "pending"}
     # Service layer passes failure_reason through; normalization happens in UserDB.
-    assert user_db.calls == [(7, "  Download failed: Timeout  ")]
+    assert user_db.calls == [(7, "  Download failed: Timeout  ", True)]
 
 
 def test_reopen_failed_request_does_not_reopen_completed_delivery(user_db):
@@ -763,6 +767,156 @@ def test_sync_delivery_states_reopens_fulfilled_request_when_error_is_not_retrya
     assert refreshed["last_failure_reason"] == "Staged retry source no longer exists"
 
 
+def test_sync_delivery_states_reopening_remembers_the_release_that_failed(user_db):
+    user = user_db.create_user(username="alice")
+    fulfilled_request = user_db.create_request(
+        user_id=user["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level="release",
+        policy_mode="request_release",
+        book_data=_book_data(),
+        release_data={"source": "prowlarr", "source_id": "dead-rel", "title": "Dead"},
+        status="fulfilled",
+        delivery_state="queued",
+    )
+
+    sync_delivery_states_from_queue_status(
+        user_db,
+        queue_status={
+            "error": {
+                "dead-rel": {
+                    "id": "dead-rel",
+                    "request_id": fulfilled_request["id"],
+                    "retry_available": False,
+                    "status_message": "No seeders: 0 found, 1 needed, nothing downloaded in 5 min",
+                },
+            },
+        },
+        user_id=user["id"],
+    )
+
+    refreshed = user_db.get_request(fulfilled_request["id"])
+    assert refreshed["release_data"] is None
+    assert refreshed["book_data"]["failed_releases"] == [
+        {"source": "prowlarr", "source_id": "dead-rel"}
+    ]
+
+
+def test_sync_delivery_states_does_not_blame_the_release_when_the_client_was_unreachable(user_db):
+    user = user_db.create_user(username="alice")
+    fulfilled_request = user_db.create_request(
+        user_id=user["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level="release",
+        policy_mode="request_release",
+        book_data=_book_data(),
+        release_data={"source": "prowlarr", "source_id": "fine-rel", "title": "Fine"},
+        status="fulfilled",
+        delivery_state="queued",
+    )
+
+    sync_delivery_states_from_queue_status(
+        user_db,
+        queue_status={
+            "error": {
+                "fine-rel": {
+                    "id": "fine-rel",
+                    "request_id": fulfilled_request["id"],
+                    "retry_available": False,
+                    "status_message": "Failed to add to qbittorrent: Failed to connect to qBittorrent",
+                },
+            },
+        },
+        user_id=user["id"],
+    )
+
+    refreshed = user_db.get_request(fulfilled_request["id"])
+    assert refreshed["status"] == "pending"  # still reopened
+    assert "failed_releases" not in refreshed["book_data"]  # but the release is not held against
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Failed to add to qbittorrent: qBittorrent authentication failed (HTTP 403)",
+        "Failed to add to qbittorrent: qBittorrent authentication failed (HTTP 401)",
+        "Failed to add to qbittorrent: qBittorrent authentication failed (login rejected)",
+        "Failed to add to deluge: Deluge Web UI authentication failed",
+    ],
+)
+def test_sync_delivery_states_does_not_blame_the_release_when_the_client_refused_the_login(
+    user_db, message
+):
+    user = user_db.create_user(username="alice")
+    fulfilled_request = user_db.create_request(
+        user_id=user["id"],
+        source_hint="prowlarr",
+        content_type="audiobook",
+        request_level="release",
+        policy_mode="request_release",
+        book_data=_book_data(),
+        release_data={"source": "prowlarr", "source_id": "fine-rel", "title": "Fine"},
+        status="fulfilled",
+        delivery_state="queued",
+    )
+
+    sync_delivery_states_from_queue_status(
+        user_db,
+        queue_status={
+            "error": {
+                "fine-rel": {
+                    "id": "fine-rel",
+                    "request_id": fulfilled_request["id"],
+                    "retry_available": False,
+                    "status_message": message,
+                },
+            },
+        },
+        user_id=user["id"],
+    )
+
+    refreshed = user_db.get_request(fulfilled_request["id"])
+    assert refreshed["status"] == "pending"
+    assert "failed_releases" not in refreshed["book_data"]
+
+
+def test_sync_delivery_states_still_blames_a_release_whose_link_is_forbidden(user_db):
+    """A tracker's 403 on the .torrent link is the release's fault, so it is remembered."""
+    user = user_db.create_user(username="alice")
+    fulfilled_request = user_db.create_request(
+        user_id=user["id"],
+        source_hint="prowlarr",
+        content_type="audiobook",
+        request_level="release",
+        policy_mode="request_release",
+        book_data=_book_data(),
+        release_data={"source": "prowlarr", "source_id": "dead-link", "title": "Dead"},
+        status="fulfilled",
+        delivery_state="queued",
+    )
+
+    sync_delivery_states_from_queue_status(
+        user_db,
+        queue_status={
+            "error": {
+                "dead-link": {
+                    "id": "dead-link",
+                    "request_id": fulfilled_request["id"],
+                    "retry_available": False,
+                    "status_message": "403 Client Error: Forbidden for url: https://tracker.example/t/1",
+                },
+            },
+        },
+        user_id=user["id"],
+    )
+
+    refreshed = user_db.get_request(fulfilled_request["id"])
+    assert refreshed["status"] == "pending"
+    assert [r.get("source_id") for r in refreshed["book_data"]["failed_releases"]] == ["dead-link"]
+
+
 def test_sync_delivery_states_preserves_retryable_error_state(user_db):
     user = user_db.create_user(username="alice")
     fulfilled_request = user_db.create_request(
@@ -803,6 +957,215 @@ def test_sync_delivery_states_preserves_retryable_error_state(user_db):
 # ---------------------------------------------------------------------------
 # book_data validation
 # ---------------------------------------------------------------------------
+
+
+def _fulfilled_with_release(user_db, user_id, source_id):
+    return user_db.create_request(
+        user_id=user_id,
+        source_hint="slskd",
+        content_type="audiobook",
+        request_level="release",
+        policy_mode="request_release",
+        book_data=_book_data("audiobook"),
+        release_data={"source": "slskd", "source_id": source_id, "title": "The Sworn Sword"},
+        status="fulfilled",
+        delivery_state="queued",
+    )
+
+
+def test_sync_delivery_states_an_earlier_failure_does_not_undo_a_later_delivery(user_db):
+    user = user_db.create_user(username="alice")
+    request = _fulfilled_with_release(user_db, user["id"], "second-try")
+
+    updated = sync_delivery_states_from_queue_status(
+        user_db,
+        queue_status={
+            "complete": {
+                "second-try": {"id": "second-try", "request_id": request["id"]},
+            },
+            "error": {
+                "first-try": {
+                    "id": "first-try",
+                    "request_id": request["id"],
+                    "retry_available": False,
+                    "status_message": "Peer transfer failed: Rejected",
+                },
+            },
+        },
+        user_id=user["id"],
+    )
+
+    refreshed = user_db.get_request(request["id"])
+    assert refreshed["status"] == "fulfilled"
+    assert refreshed["delivery_state"] == "complete"
+    assert [row["id"] for row in updated] == [request["id"]]
+
+
+def test_sync_delivery_states_a_running_retry_outranks_an_earlier_failure(user_db):
+    user = user_db.create_user(username="alice")
+    request = _fulfilled_with_release(user_db, user["id"], "retry")
+
+    sync_delivery_states_from_queue_status(
+        user_db,
+        queue_status={
+            "downloading": {"retry": {"id": "retry", "request_id": request["id"]}},
+            "error": {
+                "first-try": {
+                    "id": "first-try",
+                    "request_id": request["id"],
+                    "retry_available": False,
+                },
+            },
+        },
+        user_id=user["id"],
+    )
+
+    refreshed = user_db.get_request(request["id"])
+    assert refreshed["status"] == "fulfilled"
+    assert refreshed["delivery_state"] == "downloading"
+
+
+def test_sync_delivery_states_a_failure_alone_still_reopens(user_db):
+    user = user_db.create_user(username="alice")
+    request = _fulfilled_with_release(user_db, user["id"], "only-try")
+
+    sync_delivery_states_from_queue_status(
+        user_db,
+        queue_status={
+            "error": {
+                "only-try": {
+                    "id": "only-try",
+                    "request_id": request["id"],
+                    "retry_available": False,
+                    "status_message": "Download failed",
+                },
+            },
+        },
+        user_id=user["id"],
+    )
+
+    assert user_db.get_request(request["id"])["status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    "queue_status",
+    [{}, {"queued": {}, "downloading": {}, "complete": {}, "error": {}}],
+)
+def test_sync_delivery_states_an_empty_queue_skips_the_request_history(
+    user_db, monkeypatch, queue_status
+):
+    user = user_db.create_user(username="alice")
+    _fulfilled_with_release(user_db, user["id"], "idle")
+    calls = []
+    real_list_requests = user_db.list_requests
+
+    def counting_list_requests(**kwargs):
+        calls.append(kwargs)
+        return real_list_requests(**kwargs)
+
+    monkeypatch.setattr(user_db, "list_requests", counting_list_requests)
+
+    assert sync_delivery_states_from_queue_status(user_db, queue_status=queue_status) == []
+    assert calls == []
+
+    # A task in the queue still reads the history and syncs as before.
+    updated = sync_delivery_states_from_queue_status(
+        user_db, queue_status={"downloading": {"idle": {"id": "idle"}}}
+    )
+    assert len(calls) == 1
+    assert [row["delivery_state"] for row in updated] == ["downloading"]
+
+
+def test_reopening_after_a_failed_download_remembers_the_release(user_db):
+    # The terminal hook reopens a request the moment its download errors, with no admin involved.
+    user = user_db.create_user(username="alice")
+    request = _fulfilled_with_release(user_db, user["id"], "rejected-release")
+
+    reopened = reopen_failed_request(
+        user_db,
+        request_id=request["id"],
+        failure_reason="Peer transfer failed: Rejected (01.mp3)",
+    )
+
+    assert reopened["status"] == "pending"
+    assert reopened["book_data"]["failed_releases"] == [
+        {"source": "slskd", "source_id": "rejected-release"}
+    ]
+    assert reopened["last_failure_reason"] == "Peer transfer failed: Rejected (01.mp3)"
+
+
+def test_reopening_records_the_failed_release_in_the_same_write(user_db, monkeypatch):
+    # A second write would leave the request pending without failed_releases for a moment, and
+    # an automatic search in that window could pick the failed release again.
+    user = user_db.create_user(username="alice")
+    request = _fulfilled_with_release(user_db, user["id"], "rejected-release")
+    user_db.update_request(request["id"], book_data={**request["book_data"], "note": "kept"})
+
+    def no_second_write(*_args, **_kwargs):
+        raise AssertionError("book_data must be written by the reopen itself")
+
+    monkeypatch.setattr(user_db, "update_request", no_second_write)
+
+    reopened = reopen_failed_request(
+        user_db, request_id=request["id"], failure_reason="Download failed"
+    )
+
+    assert reopened["status"] == "pending"
+    assert reopened["book_data"]["failed_releases"] == [
+        {"source": "slskd", "source_id": "rejected-release"}
+    ]
+    assert reopened["book_data"]["note"] == "kept"
+
+
+def test_reopening_after_an_unreachable_client_does_not_blame_the_release(user_db):
+    user = user_db.create_user(username="alice")
+    request = _fulfilled_with_release(user_db, user["id"], "fine-release")
+
+    reopened = reopen_failed_request(
+        user_db,
+        request_id=request["id"],
+        failure_reason="Failed to connect to qBittorrent",
+    )
+
+    assert reopened["status"] == "pending"
+    assert "failed_releases" not in reopened["book_data"]
+
+
+def test_reopening_twice_lists_the_release_once(user_db):
+    user = user_db.create_user(username="alice")
+    request = _fulfilled_with_release(user_db, user["id"], "same-release")
+    reopen_failed_request(user_db, request_id=request["id"], failure_reason="Download failed")
+    user_db.update_request(
+        request["id"],
+        status="fulfilled",
+        delivery_state="queued",
+        release_data={"source": "slskd", "source_id": "same-release", "title": "x"},
+    )
+
+    reopened = reopen_failed_request(
+        user_db, request_id=request["id"], failure_reason="Download failed"
+    )
+
+    assert len(reopened["book_data"]["failed_releases"]) == 1
+
+
+def test_reopening_a_request_that_is_not_failed_changes_nothing(user_db):
+    user = user_db.create_user(username="alice")
+    request = user_db.create_request(
+        user_id=user["id"],
+        source_hint=None,
+        content_type="ebook",
+        request_level="book",
+        policy_mode="request_book",
+        book_data=_book_data(),
+        status="pending",
+    )
+
+    assert (
+        reopen_failed_request(user_db, request_id=request["id"], failure_reason="Download failed")
+        is None
+    )
+    assert "failed_releases" not in user_db.get_request(request["id"])["book_data"]
 
 
 def test_create_request_rejects_non_dict_book_data(user_db):
@@ -1642,3 +2005,264 @@ def test_create_request_normalizes_content_type_from_book_data(user_db):
     )
 
     assert created["content_type"] == "audiobook"
+
+
+def _rejected_request(user_db, *, request_level="book", release_data=None, note=None):
+    alice = user_db.create_user(username="alice")
+    admin = user_db.create_user(username="admin", role="admin")
+    created = create_request(
+        user_db,
+        user_id=alice["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level=request_level,
+        policy_mode="request_release" if release_data else "request_book",
+        book_data=_book_data(),
+        release_data=release_data,
+        note=note,
+    )
+    reject_request(
+        user_db,
+        request_id=created["id"],
+        admin_user_id=admin["id"],
+        admin_note="Sounds like a dumb book",
+    )
+    return alice, admin, created
+
+
+def test_reopen_request_moves_rejected_back_to_pending(user_db):
+    _alice, admin, created = _rejected_request(user_db)
+
+    reopened = reopen_request(user_db, request_id=created["id"], admin_user_id=admin["id"])
+
+    assert reopened["status"] == "pending"
+    assert reopened["reviewed_by"] is None
+    assert reopened["reviewed_at"] is None
+    assert reopened["admin_note"] is None
+    assert reopened["delivery_state"] == "none"
+
+
+def test_reopen_request_keeps_what_the_user_asked_for(user_db):
+    _alice, admin, created = _rejected_request(
+        user_db,
+        request_level="release",
+        release_data=_release_data(),
+        note="It is for my dog",
+    )
+
+    reopened = reopen_request(
+        user_db,
+        request_id=created["id"],
+        admin_user_id=admin["id"],
+        admin_note="  Fair enough  ",
+    )
+
+    assert reopened["request_level"] == "release"
+    assert reopened["release_data"] == _release_data()
+    assert reopened["note"] == "It is for my dog"
+    assert reopened["admin_note"] == "Fair enough"
+
+
+@pytest.mark.parametrize("status", ["pending", "cancelled"])
+def test_reopen_request_refuses_a_request_that_is_not_rejected(user_db, status):
+    alice = user_db.create_user(username="alice")
+    admin = user_db.create_user(username="admin", role="admin")
+    created = create_request(
+        user_db,
+        user_id=alice["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level="book",
+        policy_mode="request_book",
+        book_data=_book_data(),
+    )
+    if status == "cancelled":
+        cancel_request(user_db, request_id=created["id"], actor_user_id=alice["id"])
+
+    with pytest.raises(RequestServiceError) as exc_info:
+        reopen_request(user_db, request_id=created["id"], admin_user_id=admin["id"])
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.code == "stale_transition"
+    assert user_db.get_request(created["id"])["status"] == status
+
+
+def test_reopen_request_refuses_a_fulfilled_request(user_db):
+    alice = user_db.create_user(username="alice")
+    admin = user_db.create_user(username="admin", role="admin")
+    created = create_request(
+        user_db,
+        user_id=alice["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level="release",
+        policy_mode="request_release",
+        book_data=_book_data(),
+        release_data=_release_data(),
+    )
+    fulfil_request(
+        user_db,
+        request_id=created["id"],
+        admin_user_id=admin["id"],
+        queue_release=lambda *a, **kw: (True, None),
+    )
+
+    with pytest.raises(RequestServiceError) as exc_info:
+        reopen_request(user_db, request_id=created["id"], admin_user_id=admin["id"])
+
+    assert exc_info.value.code == "stale_transition"
+    assert user_db.get_request(created["id"])["status"] == "fulfilled"
+
+
+def test_reopen_request_refuses_when_the_user_already_asked_again(user_db):
+    alice, admin, created = _rejected_request(user_db)
+    create_request(
+        user_db,
+        user_id=alice["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level="book",
+        policy_mode="request_book",
+        book_data=_book_data(),
+    )
+
+    with pytest.raises(RequestServiceError) as exc_info:
+        reopen_request(user_db, request_id=created["id"], admin_user_id=admin["id"])
+
+    assert exc_info.value.code == "duplicate_pending_request"
+    assert user_db.get_request(created["id"])["status"] == "rejected"
+
+
+def test_reopen_request_rejects_a_non_string_admin_note(user_db):
+    _alice, admin, created = _rejected_request(user_db)
+
+    with pytest.raises(RequestServiceError) as exc_info:
+        reopen_request(user_db, request_id=created["id"], admin_user_id=admin["id"], admin_note=42)
+
+    assert exc_info.value.status_code == 400
+    assert user_db.get_request(created["id"])["status"] == "rejected"
+
+
+def test_reopen_rejected_request_returns_none_for_unknown_or_other_states(user_db):
+    assert user_db.reopen_rejected_request(999_999) is None
+
+    alice = user_db.create_user(username="alice")
+    created = create_request(
+        user_db,
+        user_id=alice["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level="book",
+        policy_mode="request_book",
+        book_data=_book_data(),
+    )
+    assert user_db.reopen_rejected_request(created["id"]) is None
+
+
+def test_rejected_request_can_be_hidden_and_shown_again(user_db):
+    _alice, _admin, created = _rejected_request(user_db)
+
+    assert user_db.set_rejected_request_hidden(created["id"], hidden=True) is True
+    assert user_db.set_rejected_request_hidden(created["id"], hidden=True) is True
+    assert user_db.list_hidden_rejected_request_ids() == [created["id"]]
+
+    assert user_db.set_rejected_request_hidden(created["id"], hidden=False) is True
+    assert user_db.list_hidden_rejected_request_ids() == []
+
+
+def test_only_a_rejected_request_can_be_hidden(user_db):
+    alice = user_db.create_user(username="alice")
+    created = create_request(
+        user_db,
+        user_id=alice["id"],
+        source_hint="prowlarr",
+        content_type="ebook",
+        request_level="book",
+        policy_mode="request_book",
+        book_data=_book_data(),
+    )
+
+    assert user_db.set_rejected_request_hidden(created["id"], hidden=True) is False
+    assert user_db.list_hidden_rejected_request_ids() == []
+
+
+def test_reopen_clears_hidden_so_a_later_rejection_starts_visible(user_db):
+    _alice, admin, created = _rejected_request(user_db)
+    user_db.set_rejected_request_hidden(created["id"], hidden=True)
+
+    reopen_request(user_db, request_id=created["id"], admin_user_id=admin["id"])
+    reject_request(user_db, request_id=created["id"], admin_user_id=admin["id"])
+
+    assert user_db.list_hidden_rejected_request_ids() == []
+
+
+def _fulfilled_request(user_db, *, delivery_state):
+    alice = user_db.create_user(username="alice")
+    admin = user_db.create_user(username="admin", role="admin")
+    created = create_request(
+        user_db,
+        user_id=alice["id"],
+        source_hint="prowlarr",
+        content_type="audiobook",
+        request_level="release",
+        policy_mode="request_release",
+        book_data=_book_data(),
+        release_data=_release_data(),
+    )
+    fulfil_request(
+        user_db,
+        request_id=created["id"],
+        admin_user_id=admin["id"],
+        queue_release=lambda *a, **kw: (True, None),
+    )
+    user_db.update_request(created["id"], delivery_state=delivery_state)
+    return created["id"], admin
+
+
+@pytest.mark.parametrize("delivery_state", ["cancelled", "error"])
+def test_reopen_request_reopens_a_fulfilled_request_whose_download_failed(user_db, delivery_state):
+    request_id, admin = _fulfilled_request(user_db, delivery_state=delivery_state)
+
+    reopened = reopen_request(
+        user_db, request_id=request_id, admin_user_id=admin["id"], admin_note="[auto] retry"
+    )
+
+    assert reopened["status"] == "pending"
+    assert reopened["delivery_state"] == "none"
+    assert reopened["release_data"] is None
+    assert reopened["admin_note"] == "[auto] retry"
+    assert reopened["last_failure_reason"] == "[auto] retry"
+    # The next automatic search skips the release that failed, as when the queue reopens it.
+    assert reopened["book_data"]["failed_releases"] == [
+        {"source": "prowlarr", "source_id": "release-123"}
+    ]
+
+
+def test_reopen_request_writes_the_note_in_the_reopening_write(user_db, monkeypatch):
+    """A failed-download reopen never lands without its note: there is no second update."""
+    request_id, admin = _fulfilled_request(user_db, delivery_state="error")
+
+    def no_second_write(*_args, **_kwargs):
+        msg = "admin_note must be written by reopen_failed_request"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(user_db, "update_request", no_second_write)
+    reopened = reopen_request(
+        user_db, request_id=request_id, admin_user_id=admin["id"], admin_note="Try again"
+    )
+
+    assert reopened["status"] == "pending"
+    assert reopened["admin_note"] == "Try again"
+
+
+@pytest.mark.parametrize("delivery_state", ["complete", "queued"])
+def test_reopen_request_refuses_a_fulfilled_request_that_is_delivered_or_in_flight(
+    user_db, delivery_state
+):
+    request_id, admin = _fulfilled_request(user_db, delivery_state=delivery_state)
+
+    with pytest.raises(RequestServiceError) as exc_info:
+        reopen_request(user_db, request_id=request_id, admin_user_id=admin["id"])
+
+    assert exc_info.value.code == "stale_transition"
+    assert user_db.get_request(request_id)["status"] == "fulfilled"
